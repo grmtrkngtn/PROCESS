@@ -89,12 +89,9 @@ def objective_function(minmax: int, data: DataStructure) -> float:
             data.times.t_plant_pulse_burn / 7200.0
         )
     elif figure_of_merit == FiguresOfMerit.MIN_INEQ_CONSTRAINT_VIOLATION:
-        # Violated is -ve in Process, so flip sign
-        c = -data.numerics.constraint_residuals_normalised[data.numerics.neqns :]
-        # Tikhonov regularisation required to avoid high variance in inequality
-        # constraint values
-        objective_metric = (
-            np.mean(c) + LAMBDA * (np.sqrt(np.sum((c - np.mean(c)) ** 2))) ** 2
-        )
+        residuals = data.numerics.constraint_residuals_normalised[data.numerics.neqns :]
+
+        violations = np.maximum(-residuals, 0.0)
+        objective_metric = np.linalg.norm(violations, ord=4)
 
     return objective_sign * objective_metric
