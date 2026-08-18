@@ -92,6 +92,6 @@ def objective_function(minmax: int, data: DataStructure) -> float:
         residuals = data.numerics.constraint_residuals_normalised[data.numerics.neqns :]
 
         violations = np.maximum(-residuals, 0.0)
-        objective_metric = np.linalg.norm(violations, ord=4)
+        objective_metric = np.linalg.norm(violations, ord=6)
 
     return objective_sign * objective_metric
