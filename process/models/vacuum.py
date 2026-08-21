@@ -7,6 +7,7 @@ import numpy as np
 
 from process.core import constants, process_output
 from process.core import process_output as po
+from process.core.exceptions import ProcessValueError
 from process.core.model import Model
 from process.models.build import FwBlktVVShape
 from process.models.engineering.ivc_functions import dshellvol, eshellvol
@@ -253,8 +254,9 @@ class Vacuum(Model):
         nplasma :
             Plasma density (m**-3)
         ndiv :
-            Number of divertors with pumping (single null = 1, double null = 2 if
-            pumping provided at both locations)
+            Number of divertors. A limiter/no-divertor configuration (0) uses
+            two symmetric pumping locations as a proxy in this legacy model;
+            single null = 1 and double null = 2.
         qtorus :
             Gas load  from NBI (deuterons/second)
         gasld :
@@ -305,7 +307,16 @@ class Vacuum(Model):
         xmult = [1.0e0, 0.423e0, 0.378e0, 0.423e0]
         # nitrogen, D-T, helium, D-T again
 
-        nduct = ntf * ndiv
+        if ndiv not in {0, 1, 2}:
+            raise ProcessValueError(f"ndiv = {ndiv} is invalid. Expected 0, 1, or 2.")
+
+        # This legacy model locates vacuum-pumping ducts at divertor locations.
+        # A limiter machine still requires vacuum pumping, so represent its
+        # up-down-symmetric pumping arrangement using two pumping locations
+        # without changing the physical divertor count elsewhere in PROCESS.
+        n_pumping_locations = 2 if ndiv == 0 else ndiv
+        nduct = ntf * n_pumping_locations
+        pumping_region = "limiter/wall" if ndiv == 0 else "divertor"
 
         #  Speed of high-vacuum pumps (m^3/s)
 
@@ -689,7 +700,7 @@ class Vacuum(Model):
             )
             process_output.ovarre(
                 self.outfile,
-                "Passage diameter, divertor to ducts (m)",
+                f"Passage diameter, {pumping_region} to ducts (m)",
                 "(d(imax))",
                 d[imax],
                 "OP ",
@@ -700,7 +711,11 @@ class Vacuum(Model):
             )
 
             process_output.ovarre(
-                self.outfile, "Duct length, divertor to elbow (m)", "(l2)", l2, "OP "
+                self.outfile,
+                f"Duct length, {pumping_region} to elbow (m)",
+                "(l2)",
+                l2,
+                "OP ",
             )
             process_output.ovarre(
                 self.outfile, "Duct length, elbow to pumps (m)", "(l3)", l3
@@ -825,11 +840,10 @@ class VacuumVessel(Model):
         """
         z_bottom = z_tf_inside_half - dz_shld_vv_gap - dz_vv_lower
 
-        # Calculate component internal upper half-height (m)
-        # If a double null machine then symmetric
-        if n_divertors == 2:
+        # Limiter and double-null machines use an up-down-symmetric vessel.
+        if n_divertors in {0, 2}:
             z_top = z_bottom
-        else:
+        elif n_divertors == 1:
             z_top = z_plasma_xpoint_upper + 0.5 * (
                 dr_fw_plasma_gap_inboard
                 + dr_fw_plasma_gap_outboard
@@ -838,6 +852,10 @@ class VacuumVessel(Model):
             )
 
             z_top = z_top + dz_blkt_upper + dz_shld_upper
+        else:
+            raise ProcessValueError(
+                f"n_divertors = {n_divertors} is invalid. Expected 0, 1, or 2."
+            )
 
         # Average of top and bottom (m)
         return 0.5 * (z_top + z_bottom)

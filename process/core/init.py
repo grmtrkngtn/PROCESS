@@ -543,7 +543,24 @@ def check_process(inputs, data):  # noqa: ARG001
                 stacklevel=2,
             )
     i_single_null = DivertorNumberModels(data.physics.i_single_null)
-    if i_single_null == DivertorNumberModels.DOUBLE_NULL:
+
+    if data.divertor.n_divertors == 0:
+        # A limiter/no-divertor design uses the up-down-symmetric vertical
+        # build associated with a double-null configuration, but retains
+        # n_divertors = 0 so that no divertor targets are modelled.
+        i_single_null = DivertorNumberModels.DOUBLE_NULL
+        data.physics.i_single_null = i_single_null
+
+        data.build.dz_fw_plasma_gap = data.build.dz_xpoint_divertor
+        data.build.dz_shld_upper = data.build.dz_shld_lower
+        data.build.dz_vv_upper = data.build.dz_vv_lower
+
+        logger.warning(
+            "No-divertor configuration: upper vertical build forced to match lower",
+            stacklevel=2,
+        )
+
+    elif i_single_null == DivertorNumberModels.DOUBLE_NULL:
         data.divertor.n_divertors = 2
         data.build.dz_fw_plasma_gap = data.build.dz_xpoint_divertor
         data.build.dz_shld_upper = data.build.dz_shld_lower
@@ -551,6 +568,7 @@ def check_process(inputs, data):  # noqa: ARG001
         logger.warning(
             "Double-null: Upper vertical build forced to match lower", stacklevel=2
         )
+
     else:  # i_single_null == DivertorNumberModels.SINGLE_NULL
         data.divertor.n_divertors = 1
 

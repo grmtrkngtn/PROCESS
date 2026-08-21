@@ -1189,6 +1189,7 @@ INPUT_VARIABLES = {
     ),
     "dte_dt_max": InputVariable("numerics", float, range=(0.0, 100.0)),
     "dne_dt_max": InputVariable("numerics", float, range=(0.0, 1.0e20)),
+    "n_divertors": InputVariable("divertor", int, range=(0, 2)),
 }
 
 

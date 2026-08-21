@@ -828,10 +828,26 @@ class Physics(Model):
             -self.data.physics.p_plasma_separatrix_mw
         )
 
-        # if double null configuration share the power
-        # over the upper and lower divertor, where self.data.physics.f_p_div_lower gives
-        # the factor of power conducted to the lower divertor
-        if self.data.divertor.n_divertors == 2:
+        # Route separatrix power according to the exhaust configuration.
+        # n_divertors:
+        #   0 = no divertor / wall-limiter exhaust
+        #   1 = single-null divertor
+        #   2 = double-null divertor
+        if self.data.divertor.n_divertors == 0:
+            self.data.physics.p_div_lower_separatrix_mw = 0.0
+            self.data.physics.p_div_upper_separatrix_mw = 0.0
+            self.data.physics.p_div_separatrix_max_mw = 0.0
+
+        elif self.data.divertor.n_divertors == 1:
+            self.data.physics.p_div_lower_separatrix_mw = (
+                self.data.physics.p_plasma_separatrix_mw
+            )
+            self.data.physics.p_div_upper_separatrix_mw = 0.0
+            self.data.physics.p_div_separatrix_max_mw = (
+                self.data.physics.p_plasma_separatrix_mw
+            )
+
+        elif self.data.divertor.n_divertors == 2:
             self.data.physics.p_div_lower_separatrix_mw = (
                 self.data.physics.f_p_div_lower
                 * self.data.physics.p_plasma_separatrix_mw
@@ -842,6 +858,12 @@ class Physics(Model):
             self.data.physics.p_div_separatrix_max_mw = max(
                 self.data.physics.p_div_lower_separatrix_mw,
                 self.data.physics.p_div_upper_separatrix_mw,
+            )
+
+        else:
+            raise ProcessValueError(
+                "Illegal value of n_divertors",
+                n_divertors=self.data.divertor.n_divertors,
             )
 
         # Resistive diffusion time = current penetration time ~ mu0.a^2/resistivity
@@ -1016,7 +1038,31 @@ class Physics(Model):
                 )
             )
         )
-        if self.data.divertor.n_divertors == 2:
+        if self.data.divertor.n_divertors == 0:
+            # No divertor configuration: there are no divertor targets.
+            self.data.physics.fli = 0.0
+            self.data.physics.flo = 0.0
+            self.data.physics.fui = 0.0
+            self.data.physics.fuo = 0.0
+
+            self.data.physics.plimw = 0.0
+            self.data.physics.plomw = 0.0
+            self.data.physics.puimw = 0.0
+            self.data.physics.puomw = 0.0
+
+        elif self.data.divertor.n_divertors == 1:
+            # Single-null configuration
+            self.data.physics.fli = self.data.physics.fio
+            self.data.physics.flo = 1.0e0 - self.data.physics.fio
+            self.data.physics.fui = 0.0
+            self.data.physics.fuo = 0.0
+
+            self.data.physics.plimw = self.data.physics.fli * self.data.physics.ptarmw
+            self.data.physics.plomw = self.data.physics.flo * self.data.physics.ptarmw
+            self.data.physics.puimw = 0.0
+            self.data.physics.puomw = 0.0
+
+        elif self.data.divertor.n_divertors == 2:
             # Double Null configuration
             # Find all the power fractions accross the targets
             # Taken from D3-D conventional divertor design
@@ -1037,13 +1083,12 @@ class Physics(Model):
             self.data.physics.plomw = self.data.physics.flo * self.data.physics.ptarmw
             self.data.physics.puimw = self.data.physics.fui * self.data.physics.ptarmw
             self.data.physics.puomw = self.data.physics.fuo * self.data.physics.ptarmw
+
         else:
-            # Single null configuration
-            self.data.physics.fli = self.data.physics.fio
-            self.data.physics.flo = 1.0e0 - self.data.physics.fio
-            # power into each target
-            self.data.physics.plimw = self.data.physics.fli * self.data.physics.ptarmw
-            self.data.physics.plomw = self.data.physics.flo * self.data.physics.ptarmw
+            raise ProcessValueError(
+                "Illegal value of n_divertors",
+                n_divertors=self.data.divertor.n_divertors,
+            )
 
         # Calculate some derived quantities that may not have been defined earlier
         self.data.physics.p_plasma_heating_total_mw = (
@@ -1171,7 +1216,7 @@ class Physics(Model):
         else:
             # TODO Misuse of constraint f-value in model. Ratio of tau_alpha / tau_E
             # = 5, but f_alpha_energy_confinement_min used here to vary it for UQ
-            # This is because f_alpha_energy_confinement_min was previously an optimisation parameter
+            # This is because f_alpha_energy_confinement_min  previously an opt. param.
             # rather than an assumption, which was wrong
             self.data.physics.nd_plasma_alphas_thermal_vol_avg = (
                 self.data.constraints.f_t_alpha_energy_confinement_min
@@ -2172,7 +2217,10 @@ class Physics(Model):
             "OP ",
         )
 
-        if self.data.stellarator.istell == 0:
+        if self.data.stellarator.istell == 0 and self.data.divertor.n_divertors == 0:
+            po.oblnkl(self.outfile)
+
+        if self.data.stellarator.istell == 0 and self.data.divertor.n_divertors > 0:
             po.oblnkl(self.outfile)
             po.ovarre(
                 self.outfile,
