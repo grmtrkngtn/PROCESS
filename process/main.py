@@ -46,6 +46,7 @@ import click
 
 import process  # noqa: F401
 from process.core import constants, init
+from process.core.caller import write_output_files
 from process.core.io import obsolete_vars as ov
 from process.core.io.cli_tools import LazyGroup, help_opt, indat_opt
 from process.core.io.mfile import MFile
@@ -55,6 +56,7 @@ from process.core.log import logging_model_handler, show_errors
 from process.core.model import DataStructure, Model
 from process.core.process_output import OutputFileManager, oheadr
 from process.core.scan import Scan
+from process.core.solver.iteration_variables import load_iteration_variables
 from process.data_structure.numerics import PROCESSRunMode
 from process.models.availability import Availability
 from process.models.blankets.blanket_library import BlanketLibrary
@@ -122,8 +124,6 @@ from process.models.tfcoil.superconducting import (
 )
 from process.models.vacuum import Vacuum, VacuumVessel
 from process.models.water_use import WaterUse
-from process.core.caller import write_output_files
-from process.core.solver.iteration_variables import load_iteration_variables
 
 PACKAGE_LOGGING = True
 """Can be set False to disable package-level logging, e.g. in the test suite"""
@@ -450,9 +450,9 @@ class SingleRun:
         elif self.data.numerics.ioptimz == PROCESSRunMode.EVALUATION:
             # Evalutation only: compute the output variables now
             # Get optimisation parameters x, evaluate models
-            load_iteration_variables()
+            load_iteration_variables(self.data)
             self.ifail = 6
-            write_output_files(models=self.models, ifail=self.ifail)
+            write_output_files(models=self.models, ifail=self.ifail, data=self.data)
             self.show_errors()
             return
         else:
