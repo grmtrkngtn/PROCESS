@@ -581,17 +581,34 @@ class ScipySLSQP(_Solver):
             np.max(np.abs(equality_residuals)) if equality_residuals.size > 0 else 0.0
         )
 
+        inequality_residuals = conf[self.meq : self.m]
+        inequality_violations = np.maximum(-inequality_residuals, 0.0)
+
+        self.data.numerics.inequality_violation_rmse = (
+            np.sqrt(np.mean(inequality_violations**2))
+            if inequality_violations.size > 0
+            else 0.0
+        )
+
+        self.data.numerics.inequality_violation_max = (
+            np.max(inequality_violations) if inequality_violations.size > 0 else 0.0
+        )
+
         self.x = result.x
         self.objf = objf
         self.conf = conf
         self.data.numerics.n_solver_iterations = result.nit
-
-        self.info = (
-            SolverOutputCondition.CONVERGED
-            if result.success
-            else SolverOutputCondition.NO_SOLUTION
-        )
-
+        if (
+            self.data.numerics.solver_problem_type
+            == SolverProblemType.MINIMUM_EQUALITY_RESIDUAL
+        ):
+            self.info = SolverOutputCondition.NO_SOLUTION
+        else:
+            self.info = (
+                SolverOutputCondition.CONVERGED
+                if result.success
+                else SolverOutputCondition.NO_SOLUTION
+            )
         return self.info
 
 
