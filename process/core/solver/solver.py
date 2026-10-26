@@ -14,6 +14,7 @@ from pyvmcon import (
     VMCONConvergenceException,
     solve,
 )
+from scipy import optimize
 from scipy.optimize import fsolve
 
 from process.core import constants, process_output
@@ -363,6 +364,123 @@ class VmconBounded(Vmcon):
         self.x_0 = x_0
 
 
+class ScipySLSQP(_Solver):
+    """Optimise using SciPy's SLSQP solver."""
+
+    SOLVER_TOL = 1.0e-5
+    EQ_CONSTRAINT_TOL = 1.0e-6
+
+    def objective(self, x: np.ndarray) -> float:
+        """Evaluate the PROCESS objective function.
+
+        Parameters
+        ----------
+        x : np.ndarray
+            Normalised optimisation parameter vector.
+
+        Returns
+        -------
+        float
+            Objective function value.
+        """
+        objf, _ = self.evaluators.fcnvmc1(len(x), self.m, x, self.ifail)
+        return objf
+
+    def equality_constraints(self, x: np.ndarray) -> np.ndarray:
+        """Evaluate the equality constraint residuals.
+
+        Parameters
+        ----------
+        x : np.ndarray
+            Normalised optimisation parameter vector.
+
+        Returns
+        -------
+        np.ndarray
+            Equality constraint residuals.
+        """
+        _, conf = self.evaluators.fcnvmc1(len(x), self.m, x, self.ifail)
+        return conf[: self.meq]
+
+    def inequality_constraints(self, x: np.ndarray) -> np.ndarray:
+        """Evaluate the inequality constraint residuals.
+
+        Parameters
+        ----------
+        x : np.ndarray
+            Normalised optimisation parameter vector.
+
+        Returns
+        -------
+        np.ndarray
+            Inequality constraint residuals.
+        """
+        _, conf = self.evaluators.fcnvmc1(len(x), self.m, x, self.ifail)
+        return conf[self.meq : self.m]
+
+    def solve(self) -> SolverOutputCondition:
+        """Optimise with equality and inequality constraints."""
+        lower_bounds = np.where(self.ilower, self.bndl, -np.inf)
+        upper_bounds = np.where(self.iupper, self.bndu, np.inf)
+        bounds = optimize.Bounds(lower_bounds, upper_bounds)
+
+        constraints = []
+
+        if self.meq > 0:
+            constraints.append(
+                optimize.NonlinearConstraint(
+                    self.equality_constraints,
+                    -self.EQ_CONSTRAINT_TOL,
+                    self.EQ_CONSTRAINT_TOL,
+                )
+            )
+
+        if self.meq < self.m:
+            constraints.append(
+                optimize.NonlinearConstraint(
+                    self.inequality_constraints,
+                    0.0,
+                    np.inf,
+                )
+            )
+
+        x_0 = np.clip(self.x_0, lower_bounds, upper_bounds)
+
+        result = optimize.minimize(
+            self.objective,
+            x_0,
+            method="SLSQP",
+            jac="3-point",
+            bounds=bounds,
+            constraints=constraints,
+            options={
+                "maxiter": self.maxcal,
+                "ftol": self.SOLVER_TOL,
+                "finite_diff_rel_step": self.data.numerics.epsfcn,
+            },
+        )
+
+        objf, conf = self.evaluators.fcnvmc1(
+            len(result.x),
+            self.m,
+            result.x,
+            self.ifail,
+        )
+
+        self.x = result.x
+        self.objf = objf
+        self.conf = conf
+        self.data.numerics.n_solver_iterations = result.nit
+
+        self.info = (
+            SolverOutputCondition.CONVERGED
+            if result.success
+            else SolverOutputCondition.NO_SOLUTION
+        )
+
+        return self.info
+
+
 class FSolve(_Solver):
     """Solve equality constraints to ensure model consistency."""
 
@@ -436,6 +554,8 @@ def get_solver(data: DataStructure, solver_name: str = "vmcon") -> _Solver:
         solver = VmconBounded(data=data)
     elif solver_name == "fsolve":
         solver = FSolve(data=data)
+    elif solver_name == "scipy_slsqp":
+        solver = ScipySLSQP(data=data)
     else:
         try:
             solver = load_external_solver(solver_name)
