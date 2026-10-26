@@ -146,6 +146,19 @@ N_CONSTRAINT_EQUATIONS_MAX = 500
 """Maximum number of constraint equations available"""
 
 
+@unique
+class SolverProblemType(IntEnum):
+    """Type of optimisation problem solved by the robust solver.
+
+    The solver progressively relaxes the problem if a fully feasible PROCESS
+    solution cannot be found.
+    """
+
+    FULLY_CONSTRAINED = 0
+    EQUALITY_ONLY = 1
+    MINIMUM_EQUALITY_RESIDUAL = 2
+
+
 @dataclass(slots=True)
 class NumericsData:
     """Dataclass holding numerics variables"""
