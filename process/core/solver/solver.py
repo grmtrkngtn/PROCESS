@@ -21,7 +21,12 @@ from process.core import constants, process_output
 from process.core.data_structure.base import DataStructure
 from process.core.exceptions import ProcessValueError
 from process.core.solver.evaluators import Evaluators
-from process.data_structure.numerics import SolverOutputCondition
+from process.core.solver.objectives import objective_function
+from process.data_structure.numerics import (
+    FiguresOfMerit,
+    SolverOutputCondition,
+    SolverProblemType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -418,22 +423,41 @@ class ScipySLSQP(_Solver):
         _, conf = self.evaluators.fcnvmc1(len(x), self.m, x, self.ifail)
         return conf[self.meq : self.m]
 
+    def inequality_violation_objective(self, x: np.ndarray) -> float:
+        """Evaluate the inequality constraint violation objective.
+
+        Parameters
+        ----------
+        x : np.ndarray
+            Normalised optimisation parameter vector.
+
+        Returns
+        -------
+        float
+            Root-mean-square normalised inequality constraint violation.
+        """
+        # Evaluate the models and constraints at the current point.
+        self.evaluators.fcnvmc1(len(x), self.m, x, self.ifail)
+
+        return objective_function(
+            FiguresOfMerit.MIN_INEQ_CONSTRAINT_VIOLATION,
+            self.data,
+        )
+
     def solve(self) -> SolverOutputCondition:
-        """Optimise with equality and inequality constraints."""
+        """Optimise with a fully constrained solve and equality-only fallback."""
         lower_bounds = np.where(self.ilower, self.bndl, -np.inf)
         upper_bounds = np.where(self.iupper, self.bndu, np.inf)
         bounds = optimize.Bounds(lower_bounds, upper_bounds)
+        x_0 = np.clip(self.x_0, lower_bounds, upper_bounds)
 
-        constraints = []
+        eq_constraints = optimize.NonlinearConstraint(
+            self.equality_constraints,
+            -self.EQ_CONSTRAINT_TOL,
+            self.EQ_CONSTRAINT_TOL,
+        )
 
-        if self.meq > 0:
-            constraints.append(
-                optimize.NonlinearConstraint(
-                    self.equality_constraints,
-                    -self.EQ_CONSTRAINT_TOL,
-                    self.EQ_CONSTRAINT_TOL,
-                )
-            )
+        constraints = [eq_constraints]
 
         if self.meq < self.m:
             constraints.append(
@@ -444,21 +468,57 @@ class ScipySLSQP(_Solver):
                 )
             )
 
-        x_0 = np.clip(self.x_0, lower_bounds, upper_bounds)
-
-        result = optimize.minimize(
-            self.objective,
-            x_0,
-            method="SLSQP",
-            jac="3-point",
-            bounds=bounds,
-            constraints=constraints,
-            options={
-                "maxiter": self.maxcal,
-                "ftol": self.SOLVER_TOL,
-                "finite_diff_rel_step": self.data.numerics.epsfcn,
-            },
+        finite_diff_step = self.data.numerics.epsfcn
+        finite_diff_steps = (
+            finite_diff_step,
+            finite_diff_step * 10.0,
+            finite_diff_step / 10.0,
         )
+
+        # Stage 1: solve the fully constrained PROCESS optimisation problem.
+        self.data.numerics.solver_problem_type = SolverProblemType.FULLY_CONSTRAINED
+        result = None
+
+        for step in finite_diff_steps:
+            result = optimize.minimize(
+                self.objective,
+                x_0,
+                method="SLSQP",
+                jac="3-point",
+                bounds=bounds,
+                constraints=constraints,
+                options={
+                    "maxiter": self.maxcal,
+                    "ftol": self.SOLVER_TOL,
+                    "finite_diff_rel_step": step,
+                },
+            )
+
+            if result.success:
+                break
+
+        # Stage 2: if no feasible solution is found, satisfy the governing
+        # equalities while minimising inequality constraint violation.
+        if not result.success:
+            self.data.numerics.solver_problem_type = SolverProblemType.EQUALITY_ONLY
+
+            for step in finite_diff_steps:
+                result = optimize.minimize(
+                    self.inequality_violation_objective,
+                    x_0,
+                    method="SLSQP",
+                    jac="3-point",
+                    bounds=bounds,
+                    constraints=eq_constraints,
+                    options={
+                        "maxiter": self.maxcal,
+                        "ftol": self.SOLVER_TOL,
+                        "finite_diff_rel_step": step,
+                    },
+                )
+
+                if result.success:
+                    break
 
         objf, conf = self.evaluators.fcnvmc1(
             len(result.x),
