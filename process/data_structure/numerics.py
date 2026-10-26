@@ -671,6 +671,9 @@ class NumericsData:
         default_factory=lambda: np.array([0.0] * N_ITERATION_VARIABLES_MAX)
     )
 
+    solver_problem_type: int = SolverProblemType.FULLY_CONSTRAINED
+    """Type of solver problem used to obtain the returned point."""
+
     force_vmcon_inequality_satisfication: int = 1
     """If 1, adds an additional convergence criteria to the VMCON solver
     that enforces a margin on the inequality constraints.
