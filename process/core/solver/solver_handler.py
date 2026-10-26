@@ -16,6 +16,7 @@ from process.data_structure.numerics import (
     FiguresOfMerit,
     PROCESSRunMode,
     SolverOutputCondition,
+    SolverProblemType,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,15 +125,115 @@ class SolverHandler:
         nums.sqsumsq = sum(r**2 for r in nums.rcm[: nums.n_equality_constraints]) ** 0.5
 
         process_output.oheadr(constants.NOUT, "Numerics")
-        s_type = (
-            "fsolve (evaluation)" if self.solver == "fsolve" else "VMCON (optimisation)"
-        )
+
+        if self.solver_name == "fsolve":
+            s_type = "fsolve (evaluation)"
+        elif self.solver_name == "scipy_slsqp":
+            s_type = "SciPy SLSQP (robust optimisation)"
+        else:
+            s_type = "VMCON (optimisation)"
+
         process_output.ocmmnt(
             constants.NOUT,
             f"PROCESS has performed a {s_type} run",
         )
+
         ifail = self.solver.info
-        if ifail != SolverOutputCondition.CONVERGED:
+
+        if self.solver_name == "scipy_slsqp":
+            problem_type = SolverProblemType(nums.solver_problem_type)
+
+            if problem_type == SolverProblemType.FULLY_CONSTRAINED:
+                process_output.ocmmnt(
+                    constants.NOUT,
+                    "and found a feasible set of parameters.",
+                )
+                process_output.oheadr(
+                    constants.IOTTY,
+                    "PROCESS found a feasible solution",
+                )
+            elif problem_type == SolverProblemType.EQUALITY_ONLY:
+                process_output.ocmmnt(
+                    constants.NOUT,
+                    "and found a solution to the governing equations, "
+                    "but the design is infeasible.",
+                )
+                process_output.oheadr(
+                    constants.IOTTY,
+                    "PROCESS found an infeasible solution",
+                )
+            else:
+                process_output.ocmmnt(
+                    constants.NOUT,
+                    "but could not satisfy the governing equations exactly.",
+                )
+                process_output.oheadr(
+                    constants.IOTTY,
+                    "PROCESS could not find a solution",
+                )
+
+            process_output.oblnkl(constants.NOUT)
+            process_output.ovarre(constants.NOUT, "Error flag", "(ifail)", ifail)
+
+            for output_file in (constants.NOUT, constants.MFILE):
+                process_output.ovarre(
+                    output_file,
+                    "Solver problem type",
+                    "(solver_problem_type)",
+                    int(problem_type),
+                )
+                process_output.ovarre(
+                    output_file,
+                    "Equality residual RMSE",
+                    "(equality_residual_rmse)",
+                    nums.equality_residual_rmse,
+                )
+                process_output.ovarre(
+                    output_file,
+                    "Maximum equality residual",
+                    "(equality_residual_max)",
+                    nums.equality_residual_max,
+                )
+
+                if problem_type != SolverProblemType.MINIMUM_EQUALITY_RESIDUAL:
+                    process_output.ovarre(
+                        output_file,
+                        "Inequality violation RMSE",
+                        "(inequality_violation_rmse)",
+                        nums.inequality_violation_rmse,
+                    )
+                    process_output.ovarre(
+                        output_file,
+                        "Maximum inequality violation",
+                        "(inequality_violation_max)",
+                        nums.inequality_violation_max,
+                    )
+
+            if problem_type == SolverProblemType.FULLY_CONSTRAINED:
+                if nums.sqsumsq >= 1.0e-2:
+                    string = (
+                        "WARNING: Constraint residues are HIGH; consider re-running\n"
+                        "   with lower values of EPSVMC to confirm convergence...\n"
+                        "   (should be able to get down to about 1.0E-8 okay)\n"
+                    )
+                    process_output.ocmmnt(constants.NOUT, ("\n" + string))
+                    print(string)
+
+                    logger.warning(f"High final constraint residues. {nums.sqsumsq=}")
+
+            elif problem_type == SolverProblemType.EQUALITY_ONLY:
+                logger.warning(
+                    "PROCESS found a governing-equation solution, but the design "
+                    "violates one or more inequality constraints."
+                )
+
+            else:
+                logger.warning(
+                    "PROCESS could not satisfy the governing equations exactly. "
+                    "Returning the point with the minimum equality residual found."
+                )
+
+        elif ifail != SolverOutputCondition.CONVERGED:
             process_output.ovarre(constants.NOUT, "Error flag", "(ifail)", ifail)
             process_output.oheadr(
                 constants.IOTTY, "PROCESS COULD NOT FIND A FEASIBLE SOLUTION"
@@ -148,7 +249,7 @@ class SolverHandler:
             print()
         else:
             # Solution found
-            descr = "consistent" if self.solver == "fsolve" else "feasible"
+            descr = "consistent" if self.solver_name == "fsolve" else "feasible"
             process_output.ocmmnt(
                 constants.NOUT, f"and found a {descr} set of parameters."
             )
@@ -233,6 +334,28 @@ class SolverHandler:
                 if ifail == SolverOutputCondition.CONVERGED
                 else "PROCESS failed to solve using fsolve.\n",
             )
+        elif self.solver_name == "scipy_slsqp":
+            problem_type = SolverProblemType(nums.solver_problem_type)
+
+            if problem_type == SolverProblemType.FULLY_CONSTRAINED:
+                process_output.write(
+                    constants.NOUT,
+                    "PROCESS has successfully optimised the optimisation parameters to"
+                    + (" minimise" if nums.i_figure_merit > 0 else " maximise")
+                    + f" the objective function: {nums.objf_name}\n",
+                )
+            elif problem_type == SolverProblemType.EQUALITY_ONLY:
+                process_output.write(
+                    constants.NOUT,
+                    "PROCESS satisfied the governing equations while minimising "
+                    "inequality constraint violation.\n",
+                )
+            else:
+                process_output.write(
+                    constants.NOUT,
+                    "PROCESS could not satisfy the governing equations exactly and "
+                    "returned the point with the minimum equality residual found.\n",
+                )
         else:
             process_output.write(
                 constants.NOUT,
