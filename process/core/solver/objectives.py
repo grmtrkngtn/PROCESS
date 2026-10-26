@@ -102,6 +102,20 @@ def objective_function(i_figure_merit: int, data: DataStructure) -> float:
             objective_metric = -0.5 * (data.current_drive.big_q_plasma / 20.0) - 0.5 * (
                 data.times.t_plant_pulse_burn / 7200.0
             )
+        case FiguresOfMerit.MIN_INEQ_CONSTRAINT_VIOLATION:
+            start = data.numerics.n_equality_constraints
+            end = start + data.numerics.n_inequality_constraints
+            inequality_residuals = data.numerics.constraint_residuals_normalised[
+                start:end
+            ]
+
+            # PROCESS inequality constraints are violated when the residual is negative.
+            # Use a one-sided quadratic penalty so satisfied constraints contribute zero.
+            violations = np.maximum(-inequality_residuals, 0.0)
+
+            objective_metric = (
+                np.sqrt(np.mean(violations**2)) if violations.size > 0 else 0.0
+            )
         case _:
             raise ProcessValueError(f"Unknown figure_of_merit: {figure_of_merit}")
 
