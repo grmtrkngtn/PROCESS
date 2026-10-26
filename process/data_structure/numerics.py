@@ -203,6 +203,12 @@ class NumericsData:
     n_solver_iterations: int = 0
     """number of optimisation iterations performed"""
 
+    equality_residual_rmse: float = 0.0
+    """Root-mean-square normalised equality constraint residual."""
+
+    equality_residual_max: float = 0.0
+    """Maximum absolute normalised equality constraint residual."""
+
     icc: list[int] = field(
         default_factory=lambda: np.array([0] * N_CONSTRAINT_EQUATIONS_MAX)
     )
