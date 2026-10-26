@@ -444,8 +444,29 @@ class ScipySLSQP(_Solver):
             self.data,
         )
 
+    def equality_residual_objective(self, x: np.ndarray) -> float:
+        """Evaluate the equality constraint residual objective.
+
+        Parameters
+        ----------
+        x : np.ndarray
+            Normalised optimisation parameter vector.
+
+        Returns
+        -------
+        float
+            Root-mean-square normalised equality constraint residual.
+        """
+        equality_residuals = self.equality_constraints(x)
+
+        return (
+            np.sqrt(np.mean(equality_residuals**2))
+            if equality_residuals.size > 0
+            else 0.0
+        )
+
     def solve(self) -> SolverOutputCondition:
-        """Optimise with a fully constrained solve and equality-only fallback."""
+        """Optimise using the three-stage robust solve."""
         lower_bounds = np.where(self.ilower, self.bndl, -np.inf)
         upper_bounds = np.where(self.iupper, self.bndu, np.inf)
         bounds = optimize.Bounds(lower_bounds, upper_bounds)
@@ -520,11 +541,44 @@ class ScipySLSQP(_Solver):
                 if result.success:
                     break
 
+        # Stage 3 solve: minimise equality residuals.
+        if not result.success:
+            self.data.numerics.solver_problem_type = (
+                SolverProblemType.MINIMUM_EQUALITY_RESIDUAL
+            )
+
+            for step in finite_diff_steps:
+                result = optimize.minimize(
+                    self.equality_residual_objective,
+                    x_0,
+                    method="SLSQP",
+                    jac="3-point",
+                    bounds=bounds,
+                    options={
+                        "maxiter": self.maxcal,
+                        "ftol": self.SOLVER_TOL,
+                        "finite_diff_rel_step": step,
+                    },
+                )
+
+                if result.success:
+                    break
+
         objf, conf = self.evaluators.fcnvmc1(
             len(result.x),
             self.m,
             result.x,
             self.ifail,
+        )
+
+        equality_residuals = conf[: self.meq]
+        self.data.numerics.equality_residual_rmse = (
+            np.sqrt(np.mean(equality_residuals**2))
+            if equality_residuals.size > 0
+            else 0.0
+        )
+        self.data.numerics.equality_residual_max = (
+            np.max(np.abs(equality_residuals)) if equality_residuals.size > 0 else 0.0
         )
 
         self.x = result.x
