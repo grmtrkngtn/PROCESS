@@ -115,6 +115,10 @@ class FiguresOfMerit(IntEnum):
         19,
         "Linear combination of big Q and pulse length (maximised)",
     )
+    MIN_INEQ_CONSTRAINT_VIOLATION = (
+        20,
+        "Minimise inequality constraint violation",
+    )
 
     def __new__(cls, value: int, description: str):
         """Create a new FiguresOfMerit enum member with description.
