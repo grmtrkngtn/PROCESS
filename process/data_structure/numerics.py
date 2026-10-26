@@ -209,6 +209,12 @@ class NumericsData:
     equality_residual_max: float = 0.0
     """Maximum absolute normalised equality constraint residual."""
 
+    inequality_violation_rmse: float = 0.0
+    """Root-mean-square normalised inequality constraint violation."""
+
+    inequality_violation_max: float = 0.0
+    """Maximum normalised inequality constraint violation."""
+
     icc: list[int] = field(
         default_factory=lambda: np.array([0] * N_CONSTRAINT_EQUATIONS_MAX)
     )
