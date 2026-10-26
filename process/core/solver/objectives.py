@@ -33,6 +33,7 @@ def objective_function(i_figure_merit: int, data: DataStructure) -> float:
         * 17: Net electrical output
         * 18: NULL, f(x) = 1
         * 19: Major radius/burn time
+        * 20: Inequality constraint violation
     data: DataStructure
         data structure object for providing data to the
         objective function
