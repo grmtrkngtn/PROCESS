@@ -215,6 +215,14 @@ class NumericsData:
     inequality_violation_max: float = 0.0
     """Maximum normalised inequality constraint violation."""
 
+    # Constraint residuals, updated on every solver evaluation.
+    constraint_residuals_normalised: np.ndarray = field(
+        default_factory=lambda: np.zeros(N_CONSTRAINT_EQUATIONS_MAX)
+    )
+    constraint_residuals: np.ndarray = field(
+        default_factory=lambda: np.zeros(N_CONSTRAINT_EQUATIONS_MAX)
+    )
+
     icc: list[int] = field(
         default_factory=lambda: np.array([0] * N_CONSTRAINT_EQUATIONS_MAX)
     )
