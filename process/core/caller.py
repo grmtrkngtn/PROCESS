@@ -100,9 +100,22 @@ class Caller:
         # Evaluate models up to 10 times; any more implies non-converging values
         for _ in range(10):
             self._call_models_once(xc)
-            # Evaluate objective function and constraints
+
+            (
+                con_residuals_normalised,
+                _,
+                con_residuals,
+                _,
+                _,
+            ) = constraints.constraint_eqns(m, -1, self.data)
+
+            # Store constraint residuals before evaluating the objective so
+            # constraint-based objectives can use the current values.
+            self.data.numerics.constraint_residuals_normalised = con_residuals_normalised
+            self.data.numerics.constraint_residuals = con_residuals
+
             objf = objective_function(self.data.numerics.i_figure_merit, self.data)
-            conf, _, _, _, _ = constraints.constraint_eqns(m, -1, self.data)
+            conf = con_residuals_normalised
 
             if objf_prev is None and conf_prev is None:
                 # First run: run again to check idempotence
