@@ -374,6 +374,7 @@ class ScipySLSQP(_Solver):
 
     SOLVER_TOL = 1.0e-5
     EQ_CONSTRAINT_TOL = 1.0e-6
+    MODEL_FAILURE_PENALTY = 1.0e6
 
     def objective(self, x: np.ndarray) -> float:
         """Evaluate the PROCESS objective function.
@@ -388,7 +389,19 @@ class ScipySLSQP(_Solver):
         float
             Objective function value.
         """
-        objf, _ = self.evaluators.fcnvmc1(len(x), self.m, x, self.ifail)
+        try:
+            objf, _ = self.evaluators.fcnvmc1(
+                len(x),
+                self.m,
+                x,
+                self.ifail,
+            )
+        except (ProcessValueError, RuntimeError):
+            return self.MODEL_FAILURE_PENALTY
+
+        if not np.isfinite(objf):
+            return self.MODEL_FAILURE_PENALTY
+
         return objf
 
     def equality_constraints(self, x: np.ndarray) -> np.ndarray:
@@ -404,8 +417,28 @@ class ScipySLSQP(_Solver):
         np.ndarray
             Equality constraint residuals.
         """
-        _, conf = self.evaluators.fcnvmc1(len(x), self.m, x, self.ifail)
-        return conf[: self.meq]
+        try:
+            _, conf = self.evaluators.fcnvmc1(
+                len(x),
+                self.m,
+                x,
+                self.ifail,
+            )
+        except (ProcessValueError, RuntimeError):
+            return np.full(self.meq, self.MODEL_FAILURE_PENALTY)
+
+        equality_residuals = conf[: self.meq]
+
+        if not np.all(np.isfinite(equality_residuals)):
+            return np.full(self.meq, self.MODEL_FAILURE_PENALTY)
+
+        return equality_residuals
+
+    def equality_constraints_satisfied(self, x: np.ndarray) -> bool:
+        """Check whether all equality constraints satisfy the PROCESS tolerance."""
+        equality_residuals = self.equality_constraints(x)
+
+        return bool(np.all(np.abs(equality_residuals) <= self.EQ_CONSTRAINT_TOL))
 
     def inequality_constraints(self, x: np.ndarray) -> np.ndarray:
         """Evaluate the inequality constraint residuals.
@@ -420,8 +453,28 @@ class ScipySLSQP(_Solver):
         np.ndarray
             Inequality constraint residuals.
         """
-        _, conf = self.evaluators.fcnvmc1(len(x), self.m, x, self.ifail)
-        return conf[self.meq : self.m]
+        try:
+            _, conf = self.evaluators.fcnvmc1(
+                len(x),
+                self.m,
+                x,
+                self.ifail,
+            )
+        except (ProcessValueError, RuntimeError):
+            return np.full(
+                self.m - self.meq,
+                -self.MODEL_FAILURE_PENALTY,
+            )
+
+        inequality_residuals = conf[self.meq : self.m]
+
+        if not np.all(np.isfinite(inequality_residuals)):
+            return np.full(
+                self.m - self.meq,
+                -self.MODEL_FAILURE_PENALTY,
+            )
+
+        return inequality_residuals
 
     def inequality_violation_objective(self, x: np.ndarray) -> float:
         """Evaluate the inequality constraint violation objective.
@@ -436,13 +489,26 @@ class ScipySLSQP(_Solver):
         float
             Root-mean-square normalised inequality constraint violation.
         """
-        # Evaluate the models and constraints at the current point.
-        self.evaluators.fcnvmc1(len(x), self.m, x, self.ifail)
+        try:
+            # Evaluate the models and constraints at the current point.
+            self.evaluators.fcnvmc1(
+                len(x),
+                self.m,
+                x,
+                self.ifail,
+            )
+        except (ProcessValueError, RuntimeError):
+            return self.MODEL_FAILURE_PENALTY
 
-        return objective_function(
+        objective = objective_function(
             FiguresOfMerit.MIN_INEQ_CONSTRAINT_VIOLATION,
             self.data,
         )
+
+        if not np.isfinite(objective):
+            return self.MODEL_FAILURE_PENALTY
+
+        return objective
 
     def equality_residual_objective(self, x: np.ndarray) -> float:
         """Evaluate the equality constraint residual objective.
@@ -464,6 +530,76 @@ class ScipySLSQP(_Solver):
             if equality_residuals.size > 0
             else 0.0
         )
+
+    def convergence_progress(self, x_current: np.ndarray) -> None:
+        """Print convergence diagnostics after each SLSQP iteration."""
+        self.iteration += 1
+
+        problem_type = SolverProblemType(self.data.numerics.solver_problem_type)
+        print(f"\nIteration {self.iteration} [{problem_type.name}]")
+
+        try:
+            objf, conf = self.evaluators.fcnvmc1(
+                len(x_current),
+                self.m,
+                x_current,
+                self.ifail,
+            )
+        except (ProcessValueError, RuntimeError) as error:
+            print(f"  Invalid PROCESS trial point: {error}")
+            return
+
+        equality_residuals = conf[: self.meq]
+        inequality_residuals = conf[self.meq : self.m]
+        inequality_violations = np.maximum(-inequality_residuals, 0.0)
+
+        equality_rmse = (
+            np.sqrt(np.mean(equality_residuals**2))
+            if equality_residuals.size > 0
+            else 0.0
+        )
+        equality_max = (
+            np.max(np.abs(equality_residuals)) if equality_residuals.size > 0 else 0.0
+        )
+        inequality_rmse = (
+            np.sqrt(np.mean(inequality_violations**2))
+            if inequality_violations.size > 0
+            else 0.0
+        )
+        inequality_max = (
+            np.max(inequality_violations) if inequality_violations.size > 0 else 0.0
+        )
+
+        if problem_type == SolverProblemType.FULLY_CONSTRAINED:
+            print(f"  PROCESS objective:        {objf:.6e}")
+        elif problem_type == SolverProblemType.EQUALITY_ONLY:
+            print(f"  Stage objective:          {inequality_rmse:.6e}")
+        else:
+            print(f"  Stage objective:          {equality_rmse:.6e}")
+
+        print(f"  Equality RMSE:           {equality_rmse:.3e}")
+        print(f"  Equality max:            {equality_max:.3e}")
+        print(f"  Inequality viol. RMSE:   {inequality_rmse:.3e}")
+        print(f"  Inequality viol. max:    {inequality_max:.3e}")
+
+        print("  Equality constraints:")
+        if equality_residuals.size == 0:
+            print("    None")
+        else:
+            for i in np.argsort(-np.abs(equality_residuals)):
+                constraint_id = self.data.numerics.icc[i]
+                print(f"    Constraint {constraint_id}: {equality_residuals[i]:+.3e}")
+
+        violated = np.where(inequality_residuals < 0.0)[0]
+
+        print("  Violated inequality constraints:")
+        if violated.size == 0:
+            print("    None")
+        else:
+            violated = violated[np.argsort(inequality_residuals[violated])]
+            for i in violated:
+                constraint_id = self.data.numerics.icc[self.meq + i]
+                print(f"    Constraint {constraint_id}: {inequality_residuals[i]:+.3e}")
 
     def solve(self) -> SolverOutputCondition:
         """Optimise using the three-stage robust solve."""
@@ -499,8 +635,15 @@ class ScipySLSQP(_Solver):
         # Stage 1: solve the fully constrained PROCESS optimisation problem.
         self.data.numerics.solver_problem_type = SolverProblemType.FULLY_CONSTRAINED
         result = None
+        stage_1_success = False
 
         for step in finite_diff_steps:
+            self.iteration = 0
+            print(
+                "\nStage 1: fully constrained solve "
+                f"(finite difference step = {step:.3e})"
+            )
+
             result = optimize.minimize(
                 self.objective,
                 x_0,
@@ -508,6 +651,7 @@ class ScipySLSQP(_Solver):
                 jac="3-point",
                 bounds=bounds,
                 constraints=constraints,
+                callback=self.convergence_progress,
                 options={
                     "maxiter": self.maxcal,
                     "ftol": self.SOLVER_TOL,
@@ -515,15 +659,24 @@ class ScipySLSQP(_Solver):
                 },
             )
 
-            if result.success:
+            if result.success and self.equality_constraints_satisfied(result.x):
+                stage_1_success = True
                 break
 
         # Stage 2: if no feasible solution is found, satisfy the governing
         # equalities while minimising inequality constraint violation.
-        if not result.success:
+        stage_2_success = False
+
+        if not stage_1_success:
             self.data.numerics.solver_problem_type = SolverProblemType.EQUALITY_ONLY
 
             for step in finite_diff_steps:
+                self.iteration = 0
+                print(
+                    "\nStage 2: equality-only solve "
+                    f"(finite difference step = {step:.3e})"
+                )
+
                 result = optimize.minimize(
                     self.inequality_violation_objective,
                     x_0,
@@ -531,6 +684,7 @@ class ScipySLSQP(_Solver):
                     jac="3-point",
                     bounds=bounds,
                     constraints=eq_constraints,
+                    callback=self.convergence_progress,
                     options={
                         "maxiter": self.maxcal,
                         "ftol": self.SOLVER_TOL,
@@ -538,22 +692,31 @@ class ScipySLSQP(_Solver):
                     },
                 )
 
-                if result.success:
+                if result.success and self.equality_constraints_satisfied(result.x):
+                    stage_2_success = True
                     break
 
-        # Stage 3 solve: minimise equality residuals.
-        if not result.success:
+        # Stage 3: if the governing equalities cannot be satisfied, minimise
+        # their normalised residuals and return the closest point found.
+        if not stage_1_success and not stage_2_success:
             self.data.numerics.solver_problem_type = (
                 SolverProblemType.MINIMUM_EQUALITY_RESIDUAL
             )
 
             for step in finite_diff_steps:
+                self.iteration = 0
+                print(
+                    "\nStage 3: minimum equality residual "
+                    f"(finite difference step = {step:.3e})"
+                )
+
                 result = optimize.minimize(
                     self.equality_residual_objective,
                     x_0,
                     method="SLSQP",
                     jac="3-point",
                     bounds=bounds,
+                    callback=self.convergence_progress,
                     options={
                         "maxiter": self.maxcal,
                         "ftol": self.SOLVER_TOL,
