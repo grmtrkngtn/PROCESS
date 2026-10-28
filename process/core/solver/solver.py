@@ -2,7 +2,9 @@
 
 import importlib
 import logging
+import time
 from abc import ABC, abstractmethod
+from operator import itemgetter
 
 import cvxpy
 import numpy as np
@@ -21,12 +23,7 @@ from process.core import constants, process_output
 from process.core.data_structure.base import DataStructure
 from process.core.exceptions import ProcessValueError
 from process.core.solver.evaluators import Evaluators
-from process.core.solver.objectives import objective_function
-from process.data_structure.numerics import (
-    FiguresOfMerit,
-    SolverOutputCondition,
-    SolverProblemType,
-)
+from process.data_structure.numerics import SolverOutputCondition
 
 logger = logging.getLogger(__name__)
 
@@ -369,412 +366,6 @@ class VmconBounded(Vmcon):
         self.x_0 = x_0
 
 
-class ScipySLSQP(_Solver):
-    """Optimise using SciPy's SLSQP solver."""
-
-    SOLVER_TOL = 1.0e-5
-    EQ_CONSTRAINT_TOL = 1.0e-6
-    MODEL_FAILURE_PENALTY = 1.0e6
-
-    def objective(self, x: np.ndarray) -> float:
-        """Evaluate the PROCESS objective function.
-
-        Parameters
-        ----------
-        x : np.ndarray
-            Normalised optimisation parameter vector.
-
-        Returns
-        -------
-        float
-            Objective function value.
-        """
-        try:
-            objf, _ = self.evaluators.fcnvmc1(
-                len(x),
-                self.m,
-                x,
-                self.ifail,
-            )
-        except (ProcessValueError, RuntimeError):
-            return self.MODEL_FAILURE_PENALTY
-
-        if not np.isfinite(objf):
-            return self.MODEL_FAILURE_PENALTY
-
-        return objf
-
-    def equality_constraints(self, x: np.ndarray) -> np.ndarray:
-        """Evaluate the equality constraint residuals.
-
-        Parameters
-        ----------
-        x : np.ndarray
-            Normalised optimisation parameter vector.
-
-        Returns
-        -------
-        np.ndarray
-            Equality constraint residuals.
-        """
-        try:
-            _, conf = self.evaluators.fcnvmc1(
-                len(x),
-                self.m,
-                x,
-                self.ifail,
-            )
-        except (ProcessValueError, RuntimeError):
-            return np.full(self.meq, self.MODEL_FAILURE_PENALTY)
-
-        equality_residuals = conf[: self.meq]
-
-        if not np.all(np.isfinite(equality_residuals)):
-            return np.full(self.meq, self.MODEL_FAILURE_PENALTY)
-
-        return equality_residuals
-
-    def equality_constraints_satisfied(self, x: np.ndarray) -> bool:
-        """Check whether all equality constraints satisfy the PROCESS tolerance."""
-        equality_residuals = self.equality_constraints(x)
-
-        return bool(np.all(np.abs(equality_residuals) <= self.EQ_CONSTRAINT_TOL))
-
-    def inequality_constraints(self, x: np.ndarray) -> np.ndarray:
-        """Evaluate the inequality constraint residuals.
-
-        Parameters
-        ----------
-        x : np.ndarray
-            Normalised optimisation parameter vector.
-
-        Returns
-        -------
-        np.ndarray
-            Inequality constraint residuals.
-        """
-        try:
-            _, conf = self.evaluators.fcnvmc1(
-                len(x),
-                self.m,
-                x,
-                self.ifail,
-            )
-        except (ProcessValueError, RuntimeError):
-            return np.full(
-                self.m - self.meq,
-                -self.MODEL_FAILURE_PENALTY,
-            )
-
-        inequality_residuals = conf[self.meq : self.m]
-
-        if not np.all(np.isfinite(inequality_residuals)):
-            return np.full(
-                self.m - self.meq,
-                -self.MODEL_FAILURE_PENALTY,
-            )
-
-        return inequality_residuals
-
-    def inequality_violation_objective(self, x: np.ndarray) -> float:
-        """Evaluate the inequality constraint violation objective.
-
-        Parameters
-        ----------
-        x : np.ndarray
-            Normalised optimisation parameter vector.
-
-        Returns
-        -------
-        float
-            Root-mean-square normalised inequality constraint violation.
-        """
-        try:
-            # Evaluate the models and constraints at the current point.
-            self.evaluators.fcnvmc1(
-                len(x),
-                self.m,
-                x,
-                self.ifail,
-            )
-        except (ProcessValueError, RuntimeError):
-            return self.MODEL_FAILURE_PENALTY
-
-        objective = objective_function(
-            FiguresOfMerit.MIN_INEQ_CONSTRAINT_VIOLATION,
-            self.data,
-        )
-
-        if not np.isfinite(objective):
-            return self.MODEL_FAILURE_PENALTY
-
-        return objective
-
-    def equality_residual_objective(self, x: np.ndarray) -> float:
-        """Evaluate the equality constraint residual objective.
-
-        Parameters
-        ----------
-        x : np.ndarray
-            Normalised optimisation parameter vector.
-
-        Returns
-        -------
-        float
-            Root-mean-square normalised equality constraint residual.
-        """
-        equality_residuals = self.equality_constraints(x)
-
-        return (
-            np.sqrt(np.mean(equality_residuals**2))
-            if equality_residuals.size > 0
-            else 0.0
-        )
-
-    def convergence_progress(self, x_current: np.ndarray) -> None:
-        """Print convergence diagnostics after each SLSQP iteration."""
-        self.iteration += 1
-
-        problem_type = SolverProblemType(self.data.numerics.solver_problem_type)
-        print(f"\nIteration {self.iteration} [{problem_type.name}]")
-
-        try:
-            objf, conf = self.evaluators.fcnvmc1(
-                len(x_current),
-                self.m,
-                x_current,
-                self.ifail,
-            )
-        except (ProcessValueError, RuntimeError) as error:
-            print(f"  Invalid PROCESS trial point: {error}")
-            return
-
-        equality_residuals = conf[: self.meq]
-        inequality_residuals = conf[self.meq : self.m]
-        inequality_violations = np.maximum(-inequality_residuals, 0.0)
-
-        equality_rmse = (
-            np.sqrt(np.mean(equality_residuals**2))
-            if equality_residuals.size > 0
-            else 0.0
-        )
-        equality_max = (
-            np.max(np.abs(equality_residuals)) if equality_residuals.size > 0 else 0.0
-        )
-        inequality_rmse = (
-            np.sqrt(np.mean(inequality_violations**2))
-            if inequality_violations.size > 0
-            else 0.0
-        )
-        inequality_max = (
-            np.max(inequality_violations) if inequality_violations.size > 0 else 0.0
-        )
-
-        if problem_type == SolverProblemType.FULLY_CONSTRAINED:
-            print(f"  PROCESS objective:        {objf:.6e}")
-        elif problem_type == SolverProblemType.EQUALITY_ONLY:
-            print(f"  Stage objective:          {inequality_rmse:.6e}")
-        else:
-            print(f"  Stage objective:          {equality_rmse:.6e}")
-
-        print(f"  Equality RMSE:           {equality_rmse:.3e}")
-        print(f"  Equality max:            {equality_max:.3e}")
-        print(f"  Inequality viol. RMSE:   {inequality_rmse:.3e}")
-        print(f"  Inequality viol. max:    {inequality_max:.3e}")
-
-        print("  Equality constraints:")
-        if equality_residuals.size == 0:
-            print("    None")
-        else:
-            for i in np.argsort(-np.abs(equality_residuals)):
-                constraint_id = self.data.numerics.icc[i]
-                print(f"    Constraint {constraint_id}: {equality_residuals[i]:+.3e}")
-
-        violated = np.where(inequality_residuals < 0.0)[0]
-
-        print("  Violated inequality constraints:")
-        if violated.size == 0:
-            print("    None")
-        else:
-            violated = violated[np.argsort(inequality_residuals[violated])]
-            for i in violated:
-                constraint_id = self.data.numerics.icc[self.meq + i]
-                print(f"    Constraint {constraint_id}: {inequality_residuals[i]:+.3e}")
-
-    def solve(self) -> SolverOutputCondition:
-        """Optimise using the three-stage robust solve."""
-        lower_bounds = np.where(self.ilower, self.bndl, -np.inf)
-        upper_bounds = np.where(self.iupper, self.bndu, np.inf)
-        bounds = optimize.Bounds(lower_bounds, upper_bounds)
-        x_0 = np.clip(self.x_0, lower_bounds, upper_bounds)
-
-        eq_constraints = optimize.NonlinearConstraint(
-            self.equality_constraints,
-            -self.EQ_CONSTRAINT_TOL,
-            self.EQ_CONSTRAINT_TOL,
-        )
-
-        constraints = [eq_constraints]
-
-        if self.meq < self.m:
-            constraints.append(
-                optimize.NonlinearConstraint(
-                    self.inequality_constraints,
-                    0.0,
-                    np.inf,
-                )
-            )
-
-        finite_diff_step = self.data.numerics.epsfcn
-        finite_diff_steps = (
-            finite_diff_step,
-            finite_diff_step * 10.0,
-            finite_diff_step / 10.0,
-        )
-
-        # Stage 1: solve the fully constrained PROCESS optimisation problem.
-        self.data.numerics.solver_problem_type = SolverProblemType.FULLY_CONSTRAINED
-        result = None
-        stage_1_success = False
-
-        for step in finite_diff_steps:
-            self.iteration = 0
-            print(
-                "\nStage 1: fully constrained solve "
-                f"(finite difference step = {step:.3e})"
-            )
-
-            result = optimize.minimize(
-                self.objective,
-                x_0,
-                method="SLSQP",
-                jac="3-point",
-                bounds=bounds,
-                constraints=constraints,
-                callback=self.convergence_progress,
-                options={
-                    "maxiter": self.maxcal,
-                    "ftol": self.SOLVER_TOL,
-                    "finite_diff_rel_step": step,
-                },
-            )
-
-            if result.success and self.equality_constraints_satisfied(result.x):
-                stage_1_success = True
-                break
-
-        # Stage 2: if no feasible solution is found, satisfy the governing
-        # equalities while minimising inequality constraint violation.
-        stage_2_success = False
-
-        if not stage_1_success:
-            self.data.numerics.solver_problem_type = SolverProblemType.EQUALITY_ONLY
-
-            for step in finite_diff_steps:
-                self.iteration = 0
-                print(
-                    "\nStage 2: equality-only solve "
-                    f"(finite difference step = {step:.3e})"
-                )
-
-                result = optimize.minimize(
-                    self.inequality_violation_objective,
-                    x_0,
-                    method="SLSQP",
-                    jac="3-point",
-                    bounds=bounds,
-                    constraints=eq_constraints,
-                    callback=self.convergence_progress,
-                    options={
-                        "maxiter": self.maxcal,
-                        "ftol": self.SOLVER_TOL,
-                        "finite_diff_rel_step": step,
-                    },
-                )
-
-                if result.success and self.equality_constraints_satisfied(result.x):
-                    stage_2_success = True
-                    break
-
-        # Stage 3: if the governing equalities cannot be satisfied, minimise
-        # their normalised residuals and return the closest point found.
-        if not stage_1_success and not stage_2_success:
-            self.data.numerics.solver_problem_type = (
-                SolverProblemType.MINIMUM_EQUALITY_RESIDUAL
-            )
-
-            for step in finite_diff_steps:
-                self.iteration = 0
-                print(
-                    "\nStage 3: minimum equality residual "
-                    f"(finite difference step = {step:.3e})"
-                )
-
-                result = optimize.minimize(
-                    self.equality_residual_objective,
-                    x_0,
-                    method="SLSQP",
-                    jac="3-point",
-                    bounds=bounds,
-                    callback=self.convergence_progress,
-                    options={
-                        "maxiter": self.maxcal,
-                        "ftol": self.SOLVER_TOL,
-                        "finite_diff_rel_step": step,
-                    },
-                )
-
-                if result.success:
-                    break
-
-        objf, conf = self.evaluators.fcnvmc1(
-            len(result.x),
-            self.m,
-            result.x,
-            self.ifail,
-        )
-
-        equality_residuals = conf[: self.meq]
-        self.data.numerics.equality_residual_rmse = (
-            np.sqrt(np.mean(equality_residuals**2))
-            if equality_residuals.size > 0
-            else 0.0
-        )
-        self.data.numerics.equality_residual_max = (
-            np.max(np.abs(equality_residuals)) if equality_residuals.size > 0 else 0.0
-        )
-
-        inequality_residuals = conf[self.meq : self.m]
-        inequality_violations = np.maximum(-inequality_residuals, 0.0)
-
-        self.data.numerics.inequality_violation_rmse = (
-            np.sqrt(np.mean(inequality_violations**2))
-            if inequality_violations.size > 0
-            else 0.0
-        )
-
-        self.data.numerics.inequality_violation_max = (
-            np.max(inequality_violations) if inequality_violations.size > 0 else 0.0
-        )
-
-        self.x = result.x
-        self.objf = objf
-        self.conf = conf
-        self.data.numerics.n_solver_iterations = result.nit
-        if (
-            self.data.numerics.solver_problem_type
-            == SolverProblemType.MINIMUM_EQUALITY_RESIDUAL
-        ):
-            self.info = SolverOutputCondition.NO_SOLUTION
-        else:
-            self.info = (
-                SolverOutputCondition.CONVERGED
-                if result.success
-                else SolverOutputCondition.NO_SOLUTION
-            )
-        return self.info
-
-
 class FSolve(_Solver):
     """Solve equality constraints to ensure model consistency."""
 
@@ -819,6 +410,553 @@ class FSolve(_Solver):
         self.info = err
         # No objective function
         self.objf = None
+        return self.info
+
+
+def _slsqp_residual(x, solver):
+    """RMSE of PROCESS' already-normalised equality residuals.
+
+    ``fcnvmc1`` returns the normalised PROCESS constraint vector.  Stage 3
+    therefore works directly with the active equality residuals rather than
+    reconstructing dimensional plasma derivatives and introducing a second
+    normalisation scheme.
+    """
+    _, conf = solver._evaluate_state(
+        np.asarray(x, dtype=float),
+        m_eval=solver.meq,
+    )
+    eq = np.asarray(conf[: solver.meq], dtype=float)
+    if eq.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(eq**2)))
+
+
+class ScipySLSQP(_Solver):
+    """Robust SciPy SLSQP solver with low-overhead diagnostics.
+
+    This keeps the original three-stage recovery structure:
+
+    1. Fully constrained solve: objective + equalities + inequalities.
+    2. Objective-20 recovery: minimise PROCESS inequality-violation RMSE while
+       enforcing the governing equalities, retaining constraint 30 as a hard
+       domain guard.
+    3. Equality-residual recovery: minimise the RMSE of PROCESS's already-
+       normalised equality residuals, retaining constraint 30 as a domain guard.
+
+    Performance changes relative to the original experimental implementation:
+
+    * only the primary finite-difference step is tried at each stage;
+    * objective/constraint calls share a one-state PROCESS evaluation cache;
+    * the progress callback evaluates PROCESS at most once per reported iterate;
+    * the selected final point is always explicitly re-evaluated so PROCESS state
+      matches the returned solution.
+    """
+
+    SOLVER_TOL = 1.0e-5
+    EQ_CONSTRAINT_TOL = 1.0e-6
+    INEQ_CONSTRAINT_TOL = 1.0e-5
+
+    FULL_MAXITER = 50
+    EQ_MAXITER = 50
+    RESIDUAL_MAXITER = 100
+
+    def __init__(self, *, data: DataStructure):
+        super().__init__(data=data)
+        self.iteration = 0
+        self.n = 0
+        self.bounds = None
+
+        # One-state cache. This avoids repeated fcnvmc1 calls when SciPy asks
+        # for objective and constraints at exactly the same x.
+        self._cache_x: np.ndarray | None = None
+        self._cache_objf: float | None = None
+        self._cache_conf: np.ndarray | None = None
+        self._cache_m: int | None = None
+
+    def _invalidate_cache(self):
+        self._cache_x = None
+        self._cache_objf = None
+        self._cache_conf = None
+        self._cache_m = None
+
+    def _evaluate_state(
+        self,
+        x: np.ndarray,
+        *,
+        m_eval: int | None = None,
+        force: bool = False,
+    ):
+        """Evaluate PROCESS once at ``x`` and cache objective/constraints.
+
+        ``m_eval`` allows the Stage-3 governing recovery to evaluate only the
+        leading active constraints it actually needs, rather than forcing all
+        engineering constraints to be valid merely to measure constraints 2
+        and 93.
+        """
+        x_arr = np.asarray(x, dtype=float)
+        m_requested = self.m if m_eval is None else int(m_eval)
+
+        if (
+            not force
+            and self._cache_x is not None
+            and self._cache_m == m_requested
+            and np.array_equal(x_arr, self._cache_x)
+        ):
+            return self._cache_objf, self._cache_conf
+
+        objf, conf = self.evaluators.fcnvmc1(self.n, m_requested, x_arr, self.ifail)
+        self._cache_x = x_arr.copy()
+        self._cache_m = m_requested
+        self._cache_objf = objf
+        self._cache_conf = np.asarray(conf, dtype=float).copy()
+        return self._cache_objf, self._cache_conf
+
+    def obj_func(self, x):
+        """Evaluate the objective function at the current optimisation point."""
+        _, conf = self._evaluate_state(x)
+
+        if abs(self.data.numerics.i_figure_merit) == 21:
+            ineq = np.asarray(conf[self.meq : self.m], dtype=float)
+
+            beta = 50.0
+            rmin = np.min(ineq)
+            softmin = rmin - np.log(np.sum(np.exp(-beta * (ineq - rmin)))) / beta
+
+            return np.sign(self.data.numerics.i_figure_merit) * softmin
+
+        objf, _ = self._evaluate_state(x)
+        return objf
+
+    def constraint_eq_vec(self, x):
+        """Return the active equality-constraint residual vector."""
+        _, conf = self._evaluate_state(x)
+        return conf[: self.meq]
+
+    def constraint_ineq_vec(self, x):
+        """Return the active inequality-constraint residual vector."""
+        _, conf = self._evaluate_state(x)
+        return conf[self.meq : self.m]
+
+    def constraint_ineq_30(self, x):
+        """Return constraint 30 (injected-power upper limit) as a domain guard."""
+        con30_idx = np.where(self.data.numerics.icc[: self.m] == 30)[0]
+        if con30_idx.size == 0:
+            # No active constraint 30: return a permanently satisfied guard.
+            return np.array([1.0])
+
+        # fcnvmc1 evaluates the first m active constraints.  Evaluate only as
+        # far as constraint 30 rather than all engineering constraints.  This
+        # prevents an unrelated later constraint (e.g. 60) from killing the
+        # Stage-3 governing-residual diagnostic.
+        idx = int(con30_idx[0])
+        _, conf = self._evaluate_state(x, m_eval=idx + 1)
+        return np.asarray([conf[idx]], dtype=float)
+
+    def convergence_progress(self, x_current):
+        """Print the same useful progress without three extra PROCESS runs."""
+        self.iteration += 1
+
+        # Stages 1 and 2 need the complete constraint vector.  Stage 3 is
+        # deliberately a governing-equation diagnostic, so do not let an
+        # unrelated invalid engineering constraint kill its progress callback.
+        if self.data.numerics.solver_problem_type == 2:
+            _, conf = self._evaluate_state(x_current, m_eval=self.meq)
+            eqs = np.asarray(conf[: self.meq], dtype=float)
+            obj = float(np.sqrt(np.mean(eqs**2))) if eqs.size else 0.0
+            ineqs = np.array([], dtype=float)
+        else:
+            obj, conf = self._evaluate_state(x_current)
+            eqs = np.asarray(conf[: self.meq], dtype=float)
+            ineqs = np.asarray(conf[self.meq : self.m], dtype=float)
+
+        violations = np.maximum(-ineqs, 0.0)
+        ineqs_rms = float(np.sqrt(np.mean(violations**2))) if violations.size else 0.0
+        eqs_rms = float(np.sqrt(np.mean(eqs**2))) if eqs.size else 0.0
+
+        print(f"\nIteration {self.iteration}:")
+        print(f"Obj func = {obj}")
+        print(f"Equality RMSE = {eqs_rms:.3e}")
+        if self.data.numerics.solver_problem_type == 2:
+            print("Inequality diagnostics = skipped in governing-residual stage")
+        else:
+            print(f"Inequality violation RMSE = {ineqs_rms:.3e}")
+
+        print("\nEquality constraints:")
+        for i in np.argsort(np.abs(eqs))[::-1]:
+            print(f"Constraint {self.data.numerics.icc[i]} = {eqs[i]:.3e}")
+
+        print("\nViolated inequality constraints:")
+        for i in np.argsort(ineqs):
+            if ineqs[i] < 0.0:
+                print(
+                    f"Constraint {self.data.numerics.icc[len(eqs) + i]} = {ineqs[i]:.3e}"
+                )
+
+        print("\nRange-normalised opt params:")
+        range_norm_opt_params = {}
+        for i in range(self.data.numerics.n_iteration_variables):
+            lower = self.data.numerics.itv_scaled_lower_bounds[i]
+            upper = self.data.numerics.itv_scaled_upper_bounds[i]
+
+            if upper == lower:
+                xnorm = 1.0
+            else:
+                xnorm = min(max((x_current[i] - lower) / (upper - lower), 0.0), 1.0)
+
+            number = self.data.numerics.ixc[i]
+            range_norm_opt_params[number] = xnorm
+
+        for number, xnorm in sorted(range_norm_opt_params.items(), key=itemgetter(1)):
+            name = self.data.numerics.lablxc[number - 1]
+            print(f"{xnorm:.3f}: {number}, {name}")
+
+    def _run_full_solve(self, constraints, finite_diff_step, x_start):
+        self.iteration = 0
+        self._invalidate_cache()
+        try:
+            result = optimize.minimize(
+                self.obj_func,
+                np.asarray(x_start, dtype=float),
+                method="SLSQP",
+                jac="3-point",
+                bounds=self.bounds,
+                constraints=constraints,
+                callback=self.convergence_progress,
+                options={
+                    "disp": True,
+                    "maxiter": self.FULL_MAXITER,
+                    "ftol": self.SOLVER_TOL,
+                    "finite_diff_rel_step": finite_diff_step,
+                },
+            )
+        except (ValueError, ProcessValueError) as exc:
+            print(f"SLSQP full constrained solve model error: {exc}")
+            return None
+        else:
+            print(
+                f"SLSQP full constrained solve: status {result.status}: {result.message}"
+            )
+            return result
+
+    def _run_eq_solve(self, eq_constraints, finite_diff_step, x_start):
+        self.iteration = 0
+        self._invalidate_cache()
+        try:
+            result = optimize.minimize(
+                self.obj_func,
+                np.asarray(x_start, dtype=float),
+                method="SLSQP",
+                jac="3-point",
+                bounds=self.bounds,
+                constraints=eq_constraints,
+                callback=self.convergence_progress,
+                options={
+                    "disp": True,
+                    "maxiter": self.EQ_MAXITER,
+                    "ftol": self.SOLVER_TOL,
+                    "finite_diff_rel_step": finite_diff_step,
+                },
+            )
+        except (ValueError, ProcessValueError) as exc:
+            print(f"SLSQP equality recovery model error: {exc}")
+            return None
+        else:
+            print(f"SLSQP equality recovery: status {result.status}: {result.message}")
+            return result
+
+    def _run_residual_solve(self, guard_constraint, finite_diff_step, x_start):
+        self.iteration = 0
+        self._invalidate_cache()
+        try:
+            result = optimize.minimize(
+                _slsqp_residual,
+                np.asarray(x_start, dtype=float),
+                args=(self,),
+                method="SLSQP",
+                jac="3-point",
+                bounds=self.bounds,
+                constraints=guard_constraint,
+                callback=self.convergence_progress,
+                options={
+                    "disp": True,
+                    "maxiter": self.RESIDUAL_MAXITER,
+                    "ftol": self.SOLVER_TOL,
+                    "finite_diff_rel_step": finite_diff_step,
+                },
+            )
+        except (ValueError, ProcessValueError) as exc:
+            print(f"SLSQP equality-residual recovery model error: {exc}")
+            return None
+        else:
+            print(
+                "SLSQP normalised equality-residual recovery: "
+                f"status {result.status}: {result.message}"
+            )
+            return result
+
+    def _set_final_state(self, x, objf=None):
+        """Re-evaluate the selected x so PROCESS output matches the returned point."""
+        self._invalidate_cache()
+        final_objf, final_conf = self._evaluate_state(np.asarray(x), force=True)
+        self.x = np.asarray(x, dtype=float).copy()
+        self.objf = final_objf if objf is None else objf
+        self.conf = np.asarray(final_conf, dtype=float).copy()
+
+    def _update_residual_diagnostics(self):
+        """Populate the robust-solver residual fields written to OUT.DAT."""
+        eq = np.asarray(self.conf[: self.meq], dtype=float)
+        ineq = np.asarray(self.conf[self.meq : self.m], dtype=float)
+
+        equality_rmse = float(np.sqrt(np.mean(eq**2))) if eq.size else 0.0
+        equality_max = float(np.max(np.abs(eq))) if eq.size else 0.0
+
+        # Same definition as objective 20: satisfied inequalities contribute 0,
+        # and the RMSE denominator is the full active inequality set.
+        violations = np.maximum(-ineq, 0.0)
+        inequality_rmse = (
+            float(np.sqrt(np.mean(violations**2))) if violations.size else 0.0
+        )
+        inequality_max = float(np.max(violations)) if violations.size else 0.0
+
+        self.data.numerics.equality_residual_rmse = equality_rmse
+        self.data.numerics.equality_residual_max = equality_max
+        self.data.numerics.inequality_violation_rmse = inequality_rmse
+        self.data.numerics.inequality_violation_max = inequality_max
+
+        if ineq.size:
+            limiting_index = int(np.argmin(ineq))
+            minimum_inequality_margin = float(ineq[limiting_index])
+            limiting_inequality_constraint = int(
+                self.data.numerics.icc[self.meq + limiting_index]
+            )
+        else:
+            minimum_inequality_margin = 0.0
+            limiting_inequality_constraint = 0
+
+        self.data.numerics.minimum_inequality_margin = minimum_inequality_margin
+        self.data.numerics.limiting_inequality_constraint = (
+            limiting_inequality_constraint
+        )
+
+        return equality_rmse, equality_max, inequality_rmse, inequality_max
+
+    def _print_final_metrics(self, label: str):
+        ineq = np.asarray(self.conf[self.meq : self.m], dtype=float)
+        eq_rmse, eq_max, ineq_rmse, ineq_max = self._update_residual_diagnostics()
+        violations = np.maximum(-ineq, 0.0)
+        violated_count = int(np.count_nonzero(violations > 0.0))
+
+        print(f"\n{label}")
+        print(f"  equality RMSE            = {eq_rmse:.3e}")
+        print(f"  max |equality residual|  = {eq_max:.3e}")
+        print(f"  violated inequalities    = {violated_count}")
+        print(f"  violation RMSE           = {ineq_rmse:.3e}")
+        print(f"  max inequality violation = {ineq_max:.3e}")
+
+    @staticmethod
+    def _report_duration(start_time):
+        """Report total robust SLSQP wall-clock duration."""
+        duration = time.time() - start_time
+        logger.info("Robust SciPy SLSQP duration: %.3f s", duration)
+        print(f"\nTotal robust SLSQP duration: {duration:.3f} s")
+
+    def solve(self) -> SolverOutputCondition:
+        """Run the three-stage robust SciPy SLSQP solve.
+
+        Raises
+        ------
+        ProcessValueError
+            If residual recovery fails or the final PROCESS constraint state is
+            invalid.
+        """
+        self.n = self.x_0.shape[0]
+
+        # Respect inactive bounds in the same way as the original implementation.
+        bndl = np.asarray(self.bndl, dtype=float).copy()
+        bndu = np.asarray(self.bndu, dtype=float).copy()
+
+        if not (np.all(self.ilower) and np.all(self.iupper)):
+            bndl[self.ilower == 0] = -np.inf
+            bndu[self.iupper == 0] = np.inf
+
+        # Keep the initial point in the active bounds.
+        self.x_0 = np.clip(np.asarray(self.x_0, dtype=float), bndl, bndu)
+        self.bounds = optimize.Bounds(lb=bndl, ub=bndu)
+
+        eq_constraint = None
+        constraints = []
+
+        if self.meq > 0:
+            eq_constraint = optimize.NonlinearConstraint(
+                self.constraint_eq_vec,
+                -self.EQ_CONSTRAINT_TOL,
+                self.EQ_CONSTRAINT_TOL,
+            )
+            constraints.append(eq_constraint)
+
+        if self.meq < self.m:
+            ineq_constraint = optimize.NonlinearConstraint(
+                self.constraint_ineq_vec,
+                0.0,
+                np.inf,
+            )
+            constraints.append(ineq_constraint)
+
+        guard_constraint = optimize.NonlinearConstraint(
+            self.constraint_ineq_30,
+            0.0,
+            np.inf,
+        )
+
+        finite_diff_step = self.data.numerics.epsfcn
+        original_figure_merit = int(self.data.numerics.i_figure_merit)
+        start_time = time.time()
+
+        # ------------------------------------------------------------------
+        # Stage 1: normal full constrained PROCESS solve.
+        # ------------------------------------------------------------------
+        print("\n=== Stage 1: full equality + inequality constrained SLSQP ===")
+        print(f"finite diff step = {finite_diff_step}")
+        self.data.numerics.solver_problem_type = 0
+        result_full = self._run_full_solve(constraints, finite_diff_step, self.x_0)
+
+        if result_full is not None and result_full.success:
+            self._set_final_state(result_full.x)
+            self._print_final_metrics("Stage 1 converged")
+            self.info = SolverOutputCondition.CONVERGED
+            self.data.numerics.n_solver_iterations = result_full.nit
+            self._report_duration(start_time)
+            return self.info
+
+        # Preserve the best point reached by Stage 1 as the Stage-2 start.
+        stage_2_start = (
+            np.asarray(result_full.x, dtype=float).copy()
+            if result_full is not None and hasattr(result_full, "x")
+            else self.x_0.copy()
+        )
+
+        # ------------------------------------------------------------------
+        # Stage 2: PROCESS objective 20.  Keep the governing equalities hard,
+        # retain constraint 30 as a hard guard, and minimise the one-sided
+        # normalised inequality-violation RMSE defined by objective_function().
+        # ------------------------------------------------------------------
+        print("\n=== Stage 2: objective-20 inequality recovery SLSQP ===")
+        self.data.numerics.solver_problem_type = 1
+
+        eq_constraints = [guard_constraint]
+        if eq_constraint is not None:
+            eq_constraints.insert(0, eq_constraint)
+
+        self.data.numerics.i_figure_merit = 20
+        self._invalidate_cache()
+        try:
+            result_eq = self._run_eq_solve(
+                eq_constraints, finite_diff_step, stage_2_start
+            )
+        finally:
+            # OUT.DAT should continue to describe the user's original PROCESS
+            # objective, not the temporary recovery objective.
+            self.data.numerics.i_figure_merit = original_figure_merit
+            self._invalidate_cache()
+
+        stage_2_obj20 = (
+            float(result_eq.fun)
+            if result_eq is not None and np.isfinite(result_eq.fun)
+            else np.inf
+        )
+
+        if result_eq is not None and result_eq.success:
+            # Re-evaluate with the original figure of merit restored.  Constraint
+            # residuals are unchanged, while OUT.DAT's objective remains coherent.
+            self._set_final_state(result_eq.x)
+            self._print_final_metrics("Stage 2 converged")
+            print(f"  objective 20 at recovery  = {stage_2_obj20:.3e}")
+
+            ineq_max = self.data.numerics.inequality_violation_max
+            eq_max = self.data.numerics.equality_residual_max
+            recovered_feasible = (
+                eq_max <= max(self.EQ_CONSTRAINT_TOL, self.SOLVER_TOL)
+                and ineq_max <= self.INEQ_CONSTRAINT_TOL
+            )
+
+            self.data.numerics.n_solver_iterations = result_eq.nit
+            if recovered_feasible:
+                print("  Stage 2 recovered a fully feasible point")
+                self.data.numerics.solver_problem_type = 0
+                self.info = SolverOutputCondition.CONVERGED
+            else:
+                print("  Governing equalities recovered, requirements remain violated")
+                self.data.numerics.solver_problem_type = 1
+                self.info = SolverOutputCondition.NO_SOLUTION
+
+            self._report_duration(start_time)
+            return self.info
+
+        # Preserve the Stage-2 incumbent for Stage 3 even when SLSQP reports
+        # failure/iteration limit.
+        stage_3_start = (
+            np.asarray(result_eq.x, dtype=float).copy()
+            if result_eq is not None and hasattr(result_eq, "x")
+            else stage_2_start
+        )
+
+        # ------------------------------------------------------------------
+        # Stage 3: minimise only the already-normalised governing residuals.
+        # Constraint 30 remains a hard guard.  The governing objective itself
+        # evaluates only the equality constraints, so an unrelated invalid
+        # engineering constraint cannot kill the diagnostic.
+        # ------------------------------------------------------------------
+        print("\n=== Stage 3: minimum governing-residual SLSQP ===")
+        self.data.numerics.solver_problem_type = 2
+
+        result_residual = self._run_residual_solve(
+            guard_constraint,
+            finite_diff_step,
+            stage_3_start,
+        )
+
+        if result_residual is None:
+            raise ProcessValueError(
+                "Residual recovery failed after full and objective-20 SLSQP "
+                "stages: model evaluation failed"
+            )
+
+        if not result_residual.success:
+            print(
+                "Stage 3 did not report formal convergence; retaining its best "
+                f"returned point: {result_residual.message}"
+            )
+
+        # Stage 3 objective can be evaluated without all inequalities, but the
+        # final robust report needs the full state.  If the full state itself is
+        # invalid, report the governing result before raising.
+        try:
+            self._set_final_state(result_residual.x)
+        except (ValueError, ProcessValueError) as exc:
+            _, eq_conf = self._evaluate_state(
+                result_residual.x, m_eval=self.meq, force=True
+            )
+            eq = np.asarray(eq_conf[: self.meq], dtype=float)
+            residual_rmse = float(np.sqrt(np.mean(eq**2))) if eq.size else 0.0
+            self.data.numerics.equality_residual_rmse = residual_rmse
+            self.data.numerics.equality_residual_max = (
+                float(np.max(np.abs(eq))) if eq.size else 0.0
+            )
+            self.data.numerics.inequality_violation_rmse = np.nan
+            self.data.numerics.inequality_violation_max = np.nan
+            raise ProcessValueError(
+                "Stage 3 found a governing-residual point, but the complete "
+                f"PROCESS constraint state is invalid: {exc}"
+            ) from exc
+
+        self._print_final_metrics("Stage 3 converged")
+        residual_rmse = self.data.numerics.equality_residual_rmse
+        self.objf = residual_rmse
+        print(f"  governing equality RMSE  = {residual_rmse:.3e}")
+
+        self.info = SolverOutputCondition.NO_SOLUTION
+        self.data.numerics.n_solver_iterations = result_residual.nit
+        self._report_duration(start_time)
         return self.info
 
 
