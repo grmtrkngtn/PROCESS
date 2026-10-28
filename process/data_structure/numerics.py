@@ -119,6 +119,10 @@ class FiguresOfMerit(IntEnum):
         20,
         "Minimise inequality constraint violation",
     )
+    SIGNED_MIN_INEQ_MARGIN = (
+        21,
+        " Extreme-satisfaction test",
+    )
 
     def __new__(cls, value: int, description: str):
         """Create a new FiguresOfMerit enum member with description.
@@ -214,6 +218,12 @@ class NumericsData:
 
     inequality_violation_max: float = 0.0
     """Maximum normalised inequality constraint violation."""
+
+    minimum_inequality_margin: float = 0.0
+    """Minimum margin of all inequality constraints."""
+
+    limiting_inequality_constraint: int = 0
+    """Index of the inequality constraint with the smallest margin."""
 
     # Constraint residuals, updated on every solver evaluation.
     constraint_residuals_normalised: list[float] = field(
