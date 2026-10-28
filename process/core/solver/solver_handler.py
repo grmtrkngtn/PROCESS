@@ -208,7 +208,18 @@ class SolverHandler:
                         "(inequality_violation_max)",
                         nums.inequality_violation_max,
                     )
-
+                    process_output.ovarre(
+                        output_file,
+                        "Minimum inequality margin",
+                        "(minimum_inequality_margin)",
+                        nums.minimum_inequality_margin,
+                    )
+                    process_output.ovarre(
+                        output_file,
+                        "Limiting inequality constraint",
+                        "(limiting_inequality_constraint)",
+                        nums.limiting_inequality_constraint,
+                    )
             if problem_type == SolverProblemType.FULLY_CONSTRAINED:
                 if nums.sqsumsq >= 1.0e-2:
                     string = (
