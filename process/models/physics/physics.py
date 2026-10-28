@@ -845,23 +845,10 @@ class Physics(Model):
         # (physical, rather than negative potential power),
         # as required by other models (e.g.
         # Physics.calculate_density_limit())
-        p_sep_raw = self.data.physics.p_plasma_separatrix_mw
+        self.data.physics.p_plasma_separatrix_mw /= 1 - np.exp(
+            -self.data.physics.p_plasma_separatrix_mw
+        )
 
-        if not p_sep_raw:
-            p_sep = 1.0
-        elif p_sep_raw > 0.0:
-            p_sep = p_sep_raw / -np.expm1(-p_sep_raw)
-        else:
-            p_sep = p_sep_raw * np.exp(p_sep_raw) / np.expm1(p_sep_raw)
-
-        if p_sep <= 0.0 or not np.isfinite(p_sep):
-            raise ProcessValueError(
-                "Non-positive separatrix power after positivity mapping",
-                p_plasma_separatrix_mw_raw=p_sep_raw,
-                p_plasma_separatrix_mw=p_sep,
-            )
-
-        self.data.physics.p_plasma_separatrix_mw = p_sep
         # if double null configuration share the power
         # over the upper and lower divertor, where
         # self.data.physics.f_p_div_lower_separatrix gives the factor of power conducted
@@ -917,15 +904,6 @@ class Physics(Model):
             eden_plasma_electrons_thermal_vol_avg=self.data.physics.eden_plasma_electrons_thermal_vol_avg,
             eden_plasma_ions_thermal_vol_avg=self.data.physics.eden_plasma_ions_thermal_vol_avg,
         )
-        if (
-            not np.isfinite(self.data.physics.t_energy_confinement)
-            or self.data.physics.t_energy_confinement <= 0.0
-        ):
-            print(
-                "\nBAD RETURNED CONFINEMENT:"
-                f"\n  tau_E  = {self.data.physics.t_energy_confinement}"
-                f"\n  P_loss = {self.data.physics.p_plasma_loss_mw}"
-            )
         self.data.physics.pden_electron_transport_loss_mw = (
             confinement_time_data.pden_electron_transport_loss_mw
         )
@@ -976,11 +954,12 @@ class Physics(Model):
             self.data.times.t_plant_pulse_burn,
             self.data.physics.ind_plasma_internal_norm,
         )
+
         self.data.physics.e_plasma_magnetic_stored = (
             0.5e0 * self.data.physics.ind_plasma * self.data.physics.plasma_current**2
         )
 
-        # Calculate auxiliary physics-related information
+        # Calculate auxiliary physics related information
         sbar = 1.0e0
         (
             self.data.physics.burnup,
@@ -1008,9 +987,7 @@ class Physics(Model):
             self.confinement.calculate_double_and_triple_product(
                 nd_plasma_electrons_vol_avg=self.data.physics.nd_plasma_electrons_vol_avg,
                 t_energy_confinement=self.data.physics.t_energy_confinement,
-                temp_plasma_electrons_vol_avg_kev=(
-                    self.data.physics.temp_plasma_electron_vol_avg_kev
-                ),
+                temp_plasma_electrons_vol_avg_kev=self.data.physics.temp_plasma_electron_vol_avg_kev,
             )
         )
 
@@ -1305,10 +1282,9 @@ class Physics(Model):
         # Negative znfuel can occur during solution and is always fatal,
         # frequently resulting in a confusing bootstrap current error later.
         # Catch early and explicitly instead
-        # Negative/zero znfuel can occur during optimisation and gives
-        # an invalid plasma composition.
-        if znfuel <= 0.0:
-            raise ProcessValueError(f"znfuel is non-positive: {znfuel}")
+        if znfuel < 0.0:
+            raise ProcessValueError(f"znfuel is negative: {znfuel}")
+
         # ======================================================================
 
         # Fuel ion density, nd_plasma_fuel_ions_vol_avg
