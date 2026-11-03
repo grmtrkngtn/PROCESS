@@ -66,3 +66,6 @@ env-fork
 !documentation/**/*.html
 process/_version.py
 *.ipynb
+*.csv
+local_uq_runner.py
+*.joblib
