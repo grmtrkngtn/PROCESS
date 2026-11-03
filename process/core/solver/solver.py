@@ -4,7 +4,6 @@ import importlib
 import logging
 import time
 from abc import ABC, abstractmethod
-from operator import itemgetter
 
 import cvxpy
 import numpy as np
@@ -18,6 +17,7 @@ from pyvmcon import (
 )
 from scipy import optimize
 from scipy.optimize import fsolve
+from scipy.stats import qmc
 
 from process.core import constants, process_output
 from process.core.data_structure.base import DataStructure
@@ -460,6 +460,14 @@ class ScipySLSQP(_Solver):
     EQ_MAXITER = 50
     RESIDUAL_MAXITER = 100
 
+    # Adaptive multistart wrapper around the unchanged robust solve:
+    #   try 1: nominal controls
+    #   try 2: first interior Sobol start, only after governing failure
+    #   try 3: second interior Sobol start, only if tries 1 and 2 disagree
+    #          in physical classification. A feasible second try stops early.
+    ADAPTIVE_SOBOL_SEED = 1729
+    ADAPTIVE_SOBOL_INTERIOR_MARGIN = 0.10
+
     def __init__(self, *, data: DataStructure):
         super().__init__(data=data)
         self.iteration = 0
@@ -473,11 +481,296 @@ class ScipySLSQP(_Solver):
         self._cache_conf: np.ndarray | None = None
         self._cache_m: int | None = None
 
+        # Best Stage-1 point for handing off to Stage 2.  A failed SLSQP solve
+        # can terminate at a worse point than one visited earlier, so do not
+        # blindly use result_full.x as the recovery start.
+        self._stage1_best_x: np.ndarray | None = None
+        self._stage1_best_score: tuple[float, ...] | None = None
+        self._stage1_best_metrics: dict[str, float | bool] | None = None
+
+        # Best Stage-2/3 points are tracked for the same reason: a failed local
+        # optimiser can terminate at a worse point than one visited earlier.
+        self._stage2_best_x: np.ndarray | None = None
+        self._stage2_best_score: tuple[float, ...] | None = None
+        self._stage2_best_metrics: dict[str, float | bool] | None = None
+        self._stage3_best_x: np.ndarray | None = None
+        self._stage3_best_eq_rmse: float | None = None
+
+    def _adaptive_sobol_starts(
+        self,
+        nominal_x: np.ndarray,
+        bndl: np.ndarray,
+        bndu: np.ndarray,
+    ) -> list[np.ndarray]:
+        """Return two reproducible interior Sobol control starts."""
+        nominal = np.asarray(nominal_x, dtype=float).copy()
+        if nominal.size == 0:
+            return []
+
+        sampler = qmc.Sobol(
+            d=nominal.size,
+            scramble=True,
+            seed=self.ADAPTIVE_SOBOL_SEED,
+        )
+        # Exactly two extra starts.
+        unit_points = sampler.random_base2(m=1)
+
+        margin = float(self.ADAPTIVE_SOBOL_INTERIOR_MARGIN)
+        if not 0.0 <= margin < 0.5:
+            raise ProcessValueError(
+                "ADAPTIVE_SOBOL_INTERIOR_MARGIN must satisfy 0 <= margin < 0.5"
+            )
+        unit_points = margin + (1.0 - 2.0 * margin) * unit_points
+
+        finite_box = np.isfinite(bndl) & np.isfinite(bndu) & (bndu > bndl)
+
+        starts = []
+        for unit_point in unit_points:
+            x_start = nominal.copy()
+            x_start[finite_box] = bndl[finite_box] + unit_point[finite_box] * (
+                bndu[finite_box] - bndl[finite_box]
+            )
+            starts.append(x_start)
+
+        return starts
+
+    @staticmethod
+    def _finite_or_inf(value: float) -> float:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return np.inf
+        return value if np.isfinite(value) else np.inf
+
+    def _adaptive_result_score(self) -> tuple[float, ...]:
+        """Rank completed robust solves by UQ-relevant physical outcome."""
+        problem_type = int(self.data.numerics.solver_problem_type)
+        eq_rmse = self._finite_or_inf(self.data.numerics.equality_residual_rmse)
+        eq_max = self._finite_or_inf(self.data.numerics.equality_residual_max)
+
+        # feasible < requirement failure < governing failure
+        if problem_type == 0:
+            return (0.0, eq_rmse, eq_max)
+
+        if problem_type == 1:
+            # The UQ response uses the maximum one-sided inequality violation.
+            ineq_max = self._finite_or_inf(self.data.numerics.inequality_violation_max)
+            ineq_rmse = self._finite_or_inf(self.data.numerics.inequality_violation_rmse)
+            return (1.0, ineq_max, ineq_rmse, eq_rmse, eq_max)
+
+        if problem_type == 2:
+            return (2.0, eq_rmse, eq_max)
+
+        return (3.0, eq_rmse, eq_max)
+
+    def _snapshot_adaptive_result(self, label: str) -> dict:
+        """Capture one completed robust solve so it can be restored later."""
+        return {
+            "label": label,
+            "score": self._adaptive_result_score(),
+            "problem_type": int(self.data.numerics.solver_problem_type),
+            "x": np.asarray(self.x, dtype=float).copy(),
+            "objf": self.objf,
+            "info": self.info,
+            "equality_residual_rmse": float(self.data.numerics.equality_residual_rmse),
+            "equality_residual_max": float(self.data.numerics.equality_residual_max),
+            "inequality_violation_rmse": float(
+                self.data.numerics.inequality_violation_rmse
+            ),
+            "inequality_violation_max": float(
+                self.data.numerics.inequality_violation_max
+            ),
+            "minimum_inequality_margin": float(
+                self.data.numerics.minimum_inequality_margin
+            ),
+            "limiting_inequality_constraint": int(
+                self.data.numerics.limiting_inequality_constraint
+            ),
+            "n_solver_iterations": int(self.data.numerics.n_solver_iterations),
+        }
+
+    def _restore_adaptive_result(self, snapshot: dict):
+        """Restore PROCESS output state to the selected adaptive result."""
+        problem_type = int(snapshot["problem_type"])
+        x = np.asarray(snapshot["x"], dtype=float)
+
+        self.data.numerics.solver_problem_type = problem_type
+
+        if problem_type in (0, 1):
+            self._set_final_state(x, objf=snapshot["objf"])
+        else:
+            # Governing failure is deliberately equality-only.
+            self._invalidate_cache()
+            _, eq_conf = self._evaluate_state(
+                x,
+                m_eval=self.meq,
+                force=True,
+            )
+            eq = np.asarray(eq_conf[: self.meq], dtype=float)
+            self.x = x.copy()
+            self.objf = snapshot["objf"]
+            self.conf = np.full(self.m, np.nan, dtype=float)
+            self.conf[: self.meq] = eq
+
+        self.info = snapshot["info"]
+        self.data.numerics.solver_problem_type = problem_type
+        self.data.numerics.equality_residual_rmse = snapshot["equality_residual_rmse"]
+        self.data.numerics.equality_residual_max = snapshot["equality_residual_max"]
+        self.data.numerics.inequality_violation_rmse = snapshot[
+            "inequality_violation_rmse"
+        ]
+        self.data.numerics.inequality_violation_max = snapshot[
+            "inequality_violation_max"
+        ]
+        self.data.numerics.minimum_inequality_margin = snapshot[
+            "minimum_inequality_margin"
+        ]
+        self.data.numerics.limiting_inequality_constraint = snapshot[
+            "limiting_inequality_constraint"
+        ]
+        self.data.numerics.n_solver_iterations = snapshot["n_solver_iterations"]
+
     def _invalidate_cache(self):
         self._cache_x = None
         self._cache_objf = None
         self._cache_conf = None
         self._cache_m = None
+
+    def _reset_stage1_recovery_candidate(self):
+        """Reset the best Stage-1 point retained for Stage-2 recovery."""
+        self._stage1_best_x = None
+        self._stage1_best_score = None
+        self._stage1_best_metrics = None
+
+    def _consider_stage1_recovery_candidate(
+        self,
+        x: np.ndarray,
+        equality_residuals: np.ndarray,
+        inequality_residuals: np.ndarray,
+    ):
+        """Retain the most useful Stage-1 point for starting Stage 2.
+
+        Preference is lexicographic:
+
+        1. Any point that already satisfies the governing equalities is preferred
+           over one that does not.
+        2. Among equality-satisfying points, retain the one with the smallest
+           inequality-violation RMSE, matching the Stage-2 objective.
+        3. If no equality-satisfying point has been seen, retain the point with
+           the smallest equality RMSE, then the smallest inequality-violation
+           RMSE as a tie-breaker.
+
+        This is deliberately a *recovery* score, not the user's PROCESS objective.
+        """
+        if self.data.numerics.solver_problem_type != 0:
+            return
+
+        eq = np.asarray(equality_residuals, dtype=float)
+        ineq = np.asarray(inequality_residuals, dtype=float)
+
+        if not np.all(np.isfinite(eq)) or not np.all(np.isfinite(ineq)):
+            return
+
+        eq_rmse = float(np.sqrt(np.mean(eq**2))) if eq.size else 0.0
+        eq_max = float(np.max(np.abs(eq))) if eq.size else 0.0
+
+        violations = np.maximum(-ineq, 0.0)
+        ineq_rmse = float(np.sqrt(np.mean(violations**2))) if violations.size else 0.0
+        ineq_max = float(np.max(violations)) if violations.size else 0.0
+
+        equality_tol = max(self.EQ_CONSTRAINT_TOL, self.SOLVER_TOL)
+        equalities_recovered = eq_max <= equality_tol
+
+        if equalities_recovered:
+            score = (0.0, ineq_rmse, eq_rmse)
+        else:
+            score = (1.0, eq_rmse, ineq_rmse)
+
+        if self._stage1_best_score is None or score < self._stage1_best_score:
+            self._stage1_best_x = np.asarray(x, dtype=float).copy()
+            self._stage1_best_score = score
+            self._stage1_best_metrics = {
+                "equalities_recovered": equalities_recovered,
+                "equality_rmse": eq_rmse,
+                "equality_max": eq_max,
+                "inequality_rmse": ineq_rmse,
+                "inequality_max": ineq_max,
+            }
+
+    def _reset_stage2_recovery_candidate(self):
+        """Reset the best Stage-2 point retained for Stage-3/handoff recovery."""
+        self._stage2_best_x = None
+        self._stage2_best_score = None
+        self._stage2_best_metrics = None
+
+    def _consider_stage2_recovery_candidate(
+        self,
+        x: np.ndarray,
+        equality_residuals: np.ndarray,
+        inequality_residuals: np.ndarray,
+    ):
+        """Retain the best Stage-2 point for either classification or Stage 3.
+
+        If the governing equalities have been recovered, prefer the point with
+        the smallest inequality-violation RMSE.  Otherwise prefer the point
+        closest to governing equilibrium.
+        """
+        if self.data.numerics.solver_problem_type != 1:
+            return
+
+        eq = np.asarray(equality_residuals, dtype=float)
+        ineq = np.asarray(inequality_residuals, dtype=float)
+
+        if not np.all(np.isfinite(eq)) or not np.all(np.isfinite(ineq)):
+            return
+
+        eq_rmse = float(np.sqrt(np.mean(eq**2))) if eq.size else 0.0
+        eq_max = float(np.max(np.abs(eq))) if eq.size else 0.0
+        violations = np.maximum(-ineq, 0.0)
+        ineq_rmse = float(np.sqrt(np.mean(violations**2))) if violations.size else 0.0
+        ineq_max = float(np.max(violations)) if violations.size else 0.0
+
+        equality_tol = max(self.EQ_CONSTRAINT_TOL, self.SOLVER_TOL)
+        equalities_recovered = eq_max <= equality_tol
+
+        if equalities_recovered:
+            score = (0.0, ineq_rmse, eq_rmse)
+        else:
+            score = (1.0, eq_rmse, ineq_rmse)
+
+        if self._stage2_best_score is None or score < self._stage2_best_score:
+            self._stage2_best_x = np.asarray(x, dtype=float).copy()
+            self._stage2_best_score = score
+            self._stage2_best_metrics = {
+                "equalities_recovered": equalities_recovered,
+                "equality_rmse": eq_rmse,
+                "equality_max": eq_max,
+                "inequality_rmse": ineq_rmse,
+                "inequality_max": ineq_max,
+            }
+
+    def _reset_stage3_recovery_candidate(self):
+        """Reset the best governing-residual point visited during Stage 3."""
+        self._stage3_best_x = None
+        self._stage3_best_eq_rmse = None
+
+    def _consider_stage3_recovery_candidate(
+        self,
+        x: np.ndarray,
+        equality_residuals: np.ndarray,
+    ):
+        """Retain the Stage-3 point with the smallest governing-equation RMSE."""
+        if self.data.numerics.solver_problem_type != 2:
+            return
+
+        eq = np.asarray(equality_residuals, dtype=float)
+        if not np.all(np.isfinite(eq)):
+            return
+
+        eq_rmse = float(np.sqrt(np.mean(eq**2))) if eq.size else 0.0
+        if self._stage3_best_eq_rmse is None or eq_rmse < self._stage3_best_eq_rmse:
+            self._stage3_best_x = np.asarray(x, dtype=float).copy()
+            self._stage3_best_eq_rmse = eq_rmse
 
     def _evaluate_state(
         self,
@@ -512,7 +805,6 @@ class ScipySLSQP(_Solver):
         return self._cache_objf, self._cache_conf
 
     def obj_func(self, x):
-        """Evaluate the objective function at the current optimisation point."""
         _, conf = self._evaluate_state(x)
 
         if abs(self.data.numerics.i_figure_merit) == 21:
@@ -528,12 +820,10 @@ class ScipySLSQP(_Solver):
         return objf
 
     def constraint_eq_vec(self, x):
-        """Return the active equality-constraint residual vector."""
         _, conf = self._evaluate_state(x)
         return conf[: self.meq]
 
     def constraint_ineq_vec(self, x):
-        """Return the active inequality-constraint residual vector."""
         _, conf = self._evaluate_state(x)
         return conf[self.meq : self.m]
 
@@ -573,6 +863,13 @@ class ScipySLSQP(_Solver):
         ineqs_rms = float(np.sqrt(np.mean(violations**2))) if violations.size else 0.0
         eqs_rms = float(np.sqrt(np.mean(eqs**2))) if eqs.size else 0.0
 
+        if self.data.numerics.solver_problem_type == 0:
+            self._consider_stage1_recovery_candidate(x_current, eqs, ineqs)
+        elif self.data.numerics.solver_problem_type == 1:
+            self._consider_stage2_recovery_candidate(x_current, eqs, ineqs)
+        elif self.data.numerics.solver_problem_type == 2:
+            self._consider_stage3_recovery_candidate(x_current, eqs)
+
         print(f"\nIteration {self.iteration}:")
         print(f"Obj func = {obj}")
         print(f"Equality RMSE = {eqs_rms:.3e}")
@@ -606,13 +903,31 @@ class ScipySLSQP(_Solver):
             number = self.data.numerics.ixc[i]
             range_norm_opt_params[number] = xnorm
 
-        for number, xnorm in sorted(range_norm_opt_params.items(), key=itemgetter(1)):
+        for number, xnorm in sorted(
+            range_norm_opt_params.items(), key=lambda item: item[1]
+        ):
             name = self.data.numerics.lablxc[number - 1]
             print(f"{xnorm:.3f}: {number}, {name}")
 
     def _run_full_solve(self, constraints, finite_diff_step, x_start):
         self.iteration = 0
         self._invalidate_cache()
+        self._reset_stage1_recovery_candidate()
+
+        # The starting point is also a legitimate recovery candidate.
+        try:
+            _, conf_start = self._evaluate_state(
+                np.asarray(x_start, dtype=float),
+                force=True,
+            )
+            self._consider_stage1_recovery_candidate(
+                x_start,
+                conf_start[: self.meq],
+                conf_start[self.meq : self.m],
+            )
+        except (ValueError, ProcessValueError, RuntimeError):
+            self._invalidate_cache()
+
         try:
             result = optimize.minimize(
                 self.obj_func,
@@ -629,18 +944,49 @@ class ScipySLSQP(_Solver):
                     "finite_diff_rel_step": finite_diff_step,
                 },
             )
-        except (ValueError, ProcessValueError) as exc:
-            print(f"SLSQP full constrained solve model error: {exc}")
-            return None
-        else:
+            # SciPy's terminal x is not guaranteed to have been the best recovery
+            # point visited, but include it in the candidate set in case the
+            # callback was not invoked for the final iterate.
+            try:
+                _, conf_final = self._evaluate_state(result.x, force=True)
+                self._consider_stage1_recovery_candidate(
+                    result.x,
+                    conf_final[: self.meq],
+                    conf_final[self.meq : self.m],
+                )
+            except (ValueError, ProcessValueError, RuntimeError):
+                self._invalidate_cache()
+
             print(
                 f"SLSQP full constrained solve: status {result.status}: {result.message}"
             )
             return result
+        except (ValueError, ProcessValueError) as exc:
+            print(f"SLSQP full constrained solve model error: {exc}")
+            return None
 
     def _run_eq_solve(self, eq_constraints, finite_diff_step, x_start):
         self.iteration = 0
         self._invalidate_cache()
+        self._reset_stage2_recovery_candidate()
+
+        # Keep the incoming handoff point as a valid fallback.  This is
+        # especially important for a Stage-3 -> Stage-2 rescue: if Stage 3 has
+        # already recovered the governing equations, Stage 2 must never lose
+        # that point merely because its local optimisation terminates poorly.
+        try:
+            _, conf_start = self._evaluate_state(
+                np.asarray(x_start, dtype=float),
+                force=True,
+            )
+            self._consider_stage2_recovery_candidate(
+                x_start,
+                conf_start[: self.meq],
+                conf_start[self.meq : self.m],
+            )
+        except (ValueError, ProcessValueError, RuntimeError):
+            self._invalidate_cache()
+
         try:
             result = optimize.minimize(
                 self.obj_func,
@@ -657,16 +1003,40 @@ class ScipySLSQP(_Solver):
                     "finite_diff_rel_step": finite_diff_step,
                 },
             )
+            try:
+                _, conf_final = self._evaluate_state(result.x, force=True)
+                self._consider_stage2_recovery_candidate(
+                    result.x,
+                    conf_final[: self.meq],
+                    conf_final[self.meq : self.m],
+                )
+            except (ValueError, ProcessValueError, RuntimeError):
+                self._invalidate_cache()
+
+            print(f"SLSQP equality recovery: status {result.status}: {result.message}")
+            return result
         except (ValueError, ProcessValueError) as exc:
             print(f"SLSQP equality recovery model error: {exc}")
             return None
-        else:
-            print(f"SLSQP equality recovery: status {result.status}: {result.message}")
-            return result
 
     def _run_residual_solve(self, guard_constraint, finite_diff_step, x_start):
         self.iteration = 0
         self._invalidate_cache()
+        self._reset_stage3_recovery_candidate()
+
+        try:
+            _, conf_start = self._evaluate_state(
+                np.asarray(x_start, dtype=float),
+                m_eval=self.meq,
+                force=True,
+            )
+            self._consider_stage3_recovery_candidate(
+                x_start,
+                conf_start[: self.meq],
+            )
+        except (ValueError, ProcessValueError, RuntimeError):
+            self._invalidate_cache()
+
         try:
             result = optimize.minimize(
                 _slsqp_residual,
@@ -684,15 +1054,27 @@ class ScipySLSQP(_Solver):
                     "finite_diff_rel_step": finite_diff_step,
                 },
             )
-        except (ValueError, ProcessValueError) as exc:
-            print(f"SLSQP equality-residual recovery model error: {exc}")
-            return None
-        else:
+            try:
+                _, conf_final = self._evaluate_state(
+                    result.x,
+                    m_eval=self.meq,
+                    force=True,
+                )
+                self._consider_stage3_recovery_candidate(
+                    result.x,
+                    conf_final[: self.meq],
+                )
+            except (ValueError, ProcessValueError, RuntimeError):
+                self._invalidate_cache()
+
             print(
                 "SLSQP normalised equality-residual recovery: "
                 f"status {result.status}: {result.message}"
             )
             return result
+        except (ValueError, ProcessValueError) as exc:
+            print(f"SLSQP equality-residual recovery model error: {exc}")
+            return None
 
     def _set_final_state(self, x, objf=None):
         """Re-evaluate the selected x so PROCESS output matches the returned point."""
@@ -741,6 +1123,7 @@ class ScipySLSQP(_Solver):
         return equality_rmse, equality_max, inequality_rmse, inequality_max
 
     def _print_final_metrics(self, label: str):
+        eq = np.asarray(self.conf[: self.meq], dtype=float)
         ineq = np.asarray(self.conf[self.meq : self.m], dtype=float)
         eq_rmse, eq_max, ineq_rmse, ineq_max = self._update_residual_diagnostics()
         violations = np.maximum(-ineq, 0.0)
@@ -753,22 +1136,116 @@ class ScipySLSQP(_Solver):
         print(f"  violation RMSE           = {ineq_rmse:.3e}")
         print(f"  max inequality violation = {ineq_max:.3e}")
 
-    @staticmethod
-    def _report_duration(start_time):
-        """Report total robust SLSQP wall-clock duration."""
+    def _report_duration(self, start_time):
         duration = time.time() - start_time
         logger.info("Robust SciPy SLSQP duration: %.3f s", duration)
         print(f"\nTotal robust SLSQP duration: {duration:.3f} s")
 
     def solve(self) -> SolverOutputCondition:
-        """Run the three-stage robust SciPy SLSQP solve.
+        """Run the robust solver with adaptive multistart verification.
 
-        Raises
-        ------
-        ProcessValueError
-            If residual recovery fails or the final PROCESS constraint state is
-            invalid.
+        Strategy
+        --------
+        1. Run the original robust Stage 1 -> 2 -> 3 chain from the nominal
+           controls.
+        2. If it returns feasible or requirement failure, accept it.
+        3. If it returns governing failure, run one additional robust chain from
+           a fixed interior Sobol control start.
+        4. If the second try is feasible, accept it immediately.
+        5. If tries 1 and 2 disagree in physical class, run the second Sobol
+           start as an adjudicating third try.
+        6. Select the best physical outcome across the tries actually performed.
+
+        This keeps the original robust solver unchanged internally and spends
+        extra PROCESS solves only where local-basin sensitivity matters.
         """
+        adaptive_start_time = time.time()
+
+        nominal_x = np.asarray(self.x_0, dtype=float).copy()
+
+        bndl = np.asarray(self.bndl, dtype=float).copy()
+        bndu = np.asarray(self.bndu, dtype=float).copy()
+        if not (np.all(self.ilower) and np.all(self.iupper)):
+            bndl[self.ilower == 0] = -np.inf
+            bndu[self.iupper == 0] = np.inf
+
+        nominal_x = np.clip(nominal_x, bndl, bndu)
+        sobol_starts = self._adaptive_sobol_starts(nominal_x, bndl, bndu)
+
+        snapshots: list[dict] = []
+
+        print("\n=== Adaptive robust solve: nominal try ===")
+        self._solve_single_robust_try(nominal_x)
+        nominal_result = self._snapshot_adaptive_result("nominal")
+        snapshots.append(nominal_result)
+
+        # Most UQ points stop here.
+        if nominal_result["problem_type"] != 2:
+            print(
+                "\nAdaptive multistart not triggered: nominal solve recovered "
+                "the governing equations."
+            )
+            print(
+                f"Total adaptive robust duration: "
+                f"{time.time() - adaptive_start_time:.3f} s"
+            )
+            return self.info
+
+        print(
+            "\nNominal solve ended in governing failure; "
+            "running Sobol verification start 1."
+        )
+        self._solve_single_robust_try(sobol_starts[0])
+        sobol_1 = self._snapshot_adaptive_result("Sobol 1")
+        snapshots.append(sobol_1)
+
+        # A feasible solution proves existence; no third solve is useful.
+        if sobol_1["problem_type"] == 0:
+            print(
+                "\nSobol 1 found a feasible control solution; "
+                "stopping adaptive verification."
+            )
+        # If both first attempts give the same physical class, accept the
+        # agreement and avoid a third full robust solve.
+        elif sobol_1["problem_type"] == nominal_result["problem_type"]:
+            print(
+                "\nNominal and Sobol 1 agree in physical classification; "
+                "third start not required."
+            )
+        else:
+            print(
+                "\nNominal and Sobol 1 disagree in physical classification; "
+                "running Sobol verification start 2."
+            )
+            self._solve_single_robust_try(sobol_starts[1])
+            snapshots.append(self._snapshot_adaptive_result("Sobol 2"))
+
+        best = min(snapshots, key=lambda item: item["score"])
+
+        print("\n=== Adaptive robust summary ===")
+        for snapshot in snapshots:
+            marker = "  <-- selected" if snapshot is best else ""
+            print(
+                f"{snapshot['label']}: "
+                f"problem_type={snapshot['problem_type']}, "
+                f"score={snapshot['score']}{marker}"
+            )
+
+        # The selected result may not be the last try performed.
+        self._restore_adaptive_result(best)
+
+        print(f"Selected adaptive result: {best['label']}")
+        print(
+            f"Total adaptive robust duration: {time.time() - adaptive_start_time:.3f} s"
+        )
+        return self.info
+
+    def _solve_single_robust_try(
+        self,
+        x_start: np.ndarray,
+    ) -> SolverOutputCondition:
+        """Run the original three-stage robust solve from one control start."""
+        self.x_0 = np.asarray(x_start, dtype=float).copy()
         self.n = self.x_0.shape[0]
 
         # Respect inactive bounds in the same way as the original implementation.
@@ -828,12 +1305,23 @@ class ScipySLSQP(_Solver):
             self._report_duration(start_time)
             return self.info
 
-        # Preserve the best point reached by Stage 1 as the Stage-2 start.
-        stage_2_start = (
-            np.asarray(result_full.x, dtype=float).copy()
-            if result_full is not None and hasattr(result_full, "x")
-            else self.x_0.copy()
-        )
+        # Start Stage 2 from the best *recovery* point visited during Stage 1,
+        # not merely the terminal SLSQP point.
+        if self._stage1_best_x is not None:
+            stage_2_start = self._stage1_best_x.copy()
+            metrics = self._stage1_best_metrics or {}
+            print(
+                "Stage 2 start: best Stage-1 recovery candidate "
+                f"(equalities_recovered={metrics.get('equalities_recovered')}, "
+                f"eq_rmse={metrics.get('equality_rmse', np.nan):.3e}, "
+                f"ineq_rmse={metrics.get('inequality_rmse', np.nan):.3e})"
+            )
+        elif result_full is not None and hasattr(result_full, "x"):
+            stage_2_start = np.asarray(result_full.x, dtype=float).copy()
+            print("Stage 2 start: Stage-1 terminal point (no valid tracked candidate)")
+        else:
+            stage_2_start = self.x_0.copy()
+            print("Stage 2 start: original x0 (Stage 1 returned no usable point)")
 
         # ------------------------------------------------------------------
         # Stage 2: PROCESS objective 20.  Keep the governing equalities hard,
@@ -859,52 +1347,74 @@ class ScipySLSQP(_Solver):
             self.data.numerics.i_figure_merit = original_figure_merit
             self._invalidate_cache()
 
-        stage_2_obj20 = (
-            float(result_eq.fun)
-            if result_eq is not None and np.isfinite(result_eq.fun)
-            else np.inf
-        )
-
-        if result_eq is not None and result_eq.success:
-            # Re-evaluate with the original figure of merit restored.  Constraint
-            # residuals are unchanged, while OUT.DAT's objective remains coherent.
-            self._set_final_state(result_eq.x)
-            self._print_final_metrics("Stage 2 converged")
-            print(f"  objective 20 at recovery  = {stage_2_obj20:.3e}")
-
-            ineq_max = self.data.numerics.inequality_violation_max
-            eq_max = self.data.numerics.equality_residual_max
-            recovered_feasible = (
-                eq_max <= max(self.EQ_CONSTRAINT_TOL, self.SOLVER_TOL)
-                and ineq_max <= self.INEQ_CONSTRAINT_TOL
+        # Select the best Stage-2 point actually visited, rather than trusting
+        # SciPy's terminal x.  Physical residuals determine whether equilibrium
+        # was recovered; formal SLSQP success is secondary.
+        if self._stage2_best_x is not None:
+            stage_2_candidate = self._stage2_best_x.copy()
+            stage_2_metrics = self._stage2_best_metrics or {}
+            print(
+                "Stage 2 candidate: best visited point "
+                f"(equalities_recovered={stage_2_metrics.get('equalities_recovered')}, "
+                f"eq_rmse={stage_2_metrics.get('equality_rmse', np.nan):.3e}, "
+                f"ineq_rmse={stage_2_metrics.get('inequality_rmse', np.nan):.3e})"
             )
+        elif result_eq is not None and hasattr(result_eq, "x"):
+            stage_2_candidate = np.asarray(result_eq.x, dtype=float).copy()
+            print("Stage 2 candidate: terminal point (no valid tracked candidate)")
+        else:
+            stage_2_candidate = stage_2_start.copy()
+            print("Stage 2 candidate: incoming Stage-2 start")
 
-            self.data.numerics.n_solver_iterations = result_eq.nit
-            if recovered_feasible:
-                print("  Stage 2 recovered a fully feasible point")
-                self.data.numerics.solver_problem_type = 0
-                self.info = SolverOutputCondition.CONVERGED
-            else:
-                print("  Governing equalities recovered, requirements remain violated")
-                self.data.numerics.solver_problem_type = 1
-                self.info = SolverOutputCondition.NO_SOLUTION
+        stage_2_candidate_valid = False
+        try:
+            self._set_final_state(stage_2_candidate)
+            self._print_final_metrics("Stage 2 best recovered point")
+            stage_2_candidate_valid = True
+        except (ValueError, ProcessValueError) as exc:
+            print(f"Stage 2 best point could not be fully evaluated: {exc}")
 
-            self._report_duration(start_time)
-            return self.info
+        if stage_2_candidate_valid:
+            eq_max = self.data.numerics.equality_residual_max
+            ineq_max = self.data.numerics.inequality_violation_max
+            equality_tol = max(self.EQ_CONSTRAINT_TOL, self.SOLVER_TOL)
 
-        # Preserve the Stage-2 incumbent for Stage 3 even when SLSQP reports
-        # failure/iteration limit.
-        stage_3_start = (
-            np.asarray(result_eq.x, dtype=float).copy()
-            if result_eq is not None and hasattr(result_eq, "x")
-            else stage_2_start
-        )
+            if eq_max <= equality_tol:
+                # We have physically recovered the governing equations.  Do not
+                # send this case to Stage 3 just because SLSQP's status flag was
+                # non-success.
+                print(
+                    "  Governing equalities recovered at the best Stage-2 point "
+                    f"(formal SLSQP success={bool(result_eq and result_eq.success)})"
+                )
+                self.data.numerics.n_solver_iterations = (
+                    int(result_eq.nit) if result_eq is not None else 0
+                )
+
+                if ineq_max <= self.INEQ_CONSTRAINT_TOL:
+                    print("  Stage 2 recovered a fully feasible point")
+                    self.data.numerics.solver_problem_type = 0
+                    self.info = SolverOutputCondition.CONVERGED
+                else:
+                    print(
+                        "  Governing equalities recovered, requirements remain violated"
+                    )
+                    self.data.numerics.solver_problem_type = 1
+                    self.info = SolverOutputCondition.NO_SOLUTION
+
+                self._report_duration(start_time)
+                return self.info
+
+        # Stage 2 genuinely did not recover the governing equations.  Hand Stage
+        # 3 the best Stage-2 point visited, not the terminal SLSQP point.
+        stage_3_start = stage_2_candidate
+        print("Stage 3 start: best Stage-2 recovery candidate")
 
         # ------------------------------------------------------------------
         # Stage 3: minimise only the already-normalised governing residuals.
-        # Constraint 30 remains a hard guard.  The governing objective itself
-        # evaluates only the equality constraints, so an unrelated invalid
-        # engineering constraint cannot kill the diagnostic.
+        # Constraint 30 remains a hard guard.  If Stage 3 recovers governing
+        # equilibrium, hand that point back to Stage 2 so requirement severity
+        # is minimised on the recovered equilibrium manifold.
         # ------------------------------------------------------------------
         print("\n=== Stage 3: minimum governing-residual SLSQP ===")
         self.data.numerics.solver_problem_type = 2
@@ -915,47 +1425,141 @@ class ScipySLSQP(_Solver):
             stage_3_start,
         )
 
-        if result_residual is None:
+        if result_residual is None and self._stage3_best_x is None:
             raise ProcessValueError(
                 "Residual recovery failed after full and objective-20 SLSQP "
                 "stages: model evaluation failed"
             )
 
-        if not result_residual.success:
+        if result_residual is not None and not result_residual.success:
             print(
-                "Stage 3 did not report formal convergence; retaining its best "
-                f"returned point: {result_residual.message}"
+                "Stage 3 did not report formal convergence; using the best "
+                f"governing-residual point visited: {result_residual.message}"
             )
 
-        # Stage 3 objective can be evaluated without all inequalities, but the
-        # final robust report needs the full state.  If the full state itself is
-        # invalid, report the governing result before raising.
-        try:
-            self._set_final_state(result_residual.x)
-        except (ValueError, ProcessValueError) as exc:
-            _, eq_conf = self._evaluate_state(
-                result_residual.x, m_eval=self.meq, force=True
+        if self._stage3_best_x is not None:
+            stage_3_candidate = self._stage3_best_x.copy()
+            print(
+                "Stage 3 candidate: best visited governing-residual point "
+                f"(eq_rmse={self._stage3_best_eq_rmse:.3e})"
             )
-            eq = np.asarray(eq_conf[: self.meq], dtype=float)
-            residual_rmse = float(np.sqrt(np.mean(eq**2))) if eq.size else 0.0
-            self.data.numerics.equality_residual_rmse = residual_rmse
-            self.data.numerics.equality_residual_max = (
-                float(np.max(np.abs(eq))) if eq.size else 0.0
-            )
-            self.data.numerics.inequality_violation_rmse = np.nan
-            self.data.numerics.inequality_violation_max = np.nan
-            raise ProcessValueError(
-                "Stage 3 found a governing-residual point, but the complete "
-                f"PROCESS constraint state is invalid: {exc}"
-            ) from exc
+        elif result_residual is not None and hasattr(result_residual, "x"):
+            stage_3_candidate = np.asarray(result_residual.x, dtype=float).copy()
+            print("Stage 3 candidate: terminal point (no valid tracked candidate)")
+        else:
+            stage_3_candidate = stage_3_start.copy()
 
-        self._print_final_metrics("Stage 3 converged")
-        residual_rmse = self.data.numerics.equality_residual_rmse
-        self.objf = residual_rmse
-        print(f"  governing equality RMSE  = {residual_rmse:.3e}")
+        # First evaluate only the governing equalities, which is always the
+        # quantity Stage 3 is responsible for recovering.
+        _, eq_conf = self._evaluate_state(
+            stage_3_candidate,
+            m_eval=self.meq,
+            force=True,
+        )
+        eq = np.asarray(eq_conf[: self.meq], dtype=float)
+        stage_3_eq_rmse = float(np.sqrt(np.mean(eq**2))) if eq.size else 0.0
+        stage_3_eq_max = float(np.max(np.abs(eq))) if eq.size else 0.0
+        equality_tol = max(self.EQ_CONSTRAINT_TOL, self.SOLVER_TOL)
+
+        print(
+            "Stage 3 governing residuals: "
+            f"RMSE={stage_3_eq_rmse:.3e}, max={stage_3_eq_max:.3e}"
+        )
+
+        if stage_3_eq_max <= equality_tol:
+            print(
+                "Stage 3 recovered the governing equations; handing the best "
+                "Stage-3 point back to Stage 2."
+            )
+
+            # Re-run objective 20 from the recovered equilibrium.  The Stage-2
+            # tracker preserves the incoming Stage-3 point, so even if this
+            # rescue optimisation terminates badly we cannot lose the recovered
+            # equilibrium.
+            self.data.numerics.solver_problem_type = 1
+            self.data.numerics.i_figure_merit = 20
+            self._invalidate_cache()
+            try:
+                result_eq_rescue = self._run_eq_solve(
+                    eq_constraints,
+                    finite_diff_step,
+                    stage_3_candidate,
+                )
+            finally:
+                self.data.numerics.i_figure_merit = original_figure_merit
+                self._invalidate_cache()
+
+            if self._stage2_best_x is not None:
+                rescue_candidate = self._stage2_best_x.copy()
+            elif result_eq_rescue is not None and hasattr(result_eq_rescue, "x"):
+                rescue_candidate = np.asarray(result_eq_rescue.x, dtype=float).copy()
+            else:
+                rescue_candidate = stage_3_candidate.copy()
+
+            self._set_final_state(rescue_candidate)
+            self._print_final_metrics("Stage 2 rescue after Stage 3")
+
+            eq_max = self.data.numerics.equality_residual_max
+            ineq_max = self.data.numerics.inequality_violation_max
+            self.data.numerics.n_solver_iterations = (
+                int(result_eq_rescue.nit) if result_eq_rescue is not None else 0
+            )
+
+            # Because _run_eq_solve seeded its tracker with the Stage-3 point,
+            # this should normally remain equality-recovered.  Keep the check
+            # explicit rather than silently misclassifying a numerical failure.
+            if eq_max <= equality_tol:
+                if ineq_max <= self.INEQ_CONSTRAINT_TOL:
+                    print("  Stage 3 -> Stage 2 rescue found a fully feasible point")
+                    self.data.numerics.solver_problem_type = 0
+                    self.info = SolverOutputCondition.CONVERGED
+                else:
+                    print(
+                        "  Stage 3 -> Stage 2 rescue recovered equilibrium; "
+                        "requirements remain violated"
+                    )
+                    self.data.numerics.solver_problem_type = 1
+                    self.info = SolverOutputCondition.NO_SOLUTION
+
+                self._report_duration(start_time)
+                return self.info
+
+            print(
+                "  Stage 2 rescue did not retain the recovered governing point; "
+                "falling back to the best Stage-3 diagnostic point."
+            )
+
+        # Genuine governing failure: Stage 3 could not recover the governing
+        # equations within tolerance. Stage 3 is deliberately an equality-only
+        # diagnostic: do not evaluate or validate any inequality constraint here.
+        self.data.numerics.solver_problem_type = 2
+
+        # Preserve the best Stage-3 point for SolverHandler output. The models
+        # have already been evaluated at this point above with m_eval=self.meq.
+        self.x = np.asarray(stage_3_candidate, dtype=float).copy()
+        self.objf = stage_3_eq_rmse
+
+        # SolverHandler expects a full-length constraint vector. Store only the
+        # governing equality residuals and mark inequalities as unavailable.
+        self.conf = np.full(self.m, np.nan, dtype=float)
+        self.conf[: self.meq] = eq
+
+        self.data.numerics.equality_residual_rmse = stage_3_eq_rmse
+        self.data.numerics.equality_residual_max = stage_3_eq_max
+        self.data.numerics.inequality_violation_rmse = np.nan
+        self.data.numerics.inequality_violation_max = np.nan
+        self.data.numerics.minimum_inequality_margin = np.nan
+        self.data.numerics.limiting_inequality_constraint = 0
+
+        print(
+            "Stage 3 governing failure: inequality constraints were not "
+            "evaluated at the selected governing-residual point"
+        )
 
         self.info = SolverOutputCondition.NO_SOLUTION
-        self.data.numerics.n_solver_iterations = result_residual.nit
+        self.data.numerics.n_solver_iterations = (
+            int(result_residual.nit) if result_residual is not None else 0
+        )
         self._report_duration(start_time)
         return self.info
 

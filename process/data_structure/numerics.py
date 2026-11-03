@@ -225,6 +225,9 @@ class NumericsData:
     limiting_inequality_constraint: int = 0
     """Index of the inequality constraint with the smallest margin."""
 
+    ppb_loss_reference: float = 0.0
+    """Reference power balance loss [MW]"""
+
     # Constraint residuals, updated on every solver evaluation.
     constraint_residuals_normalised: list[float] = field(
         default_factory=lambda: np.zeros(N_CONSTRAINT_EQUATIONS_MAX)

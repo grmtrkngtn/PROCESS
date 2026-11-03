@@ -274,7 +274,17 @@ class Scan:
     def doopt(self):
         """Run the optimiser or solver."""
         ifail = self.solver_handler.run()
-        constraints.constraints_output(self.data, self.solver)
+
+        # Stage 3 is deliberately an equality-only governing diagnostic.  The
+        # selected point may make engineering inequality models undefined, so do
+        # not force a full constraint re-evaluation after the solver returns.
+        if self.data.numerics.solver_problem_type != 2:
+            constraints.constraints_output(self.data, self.solver)
+        else:
+            print(
+                "Skipping full constraint output for Stage-3 governing failure "
+                "(inequalities intentionally not evaluated)"
+            )
 
         return ifail
 

@@ -220,6 +220,12 @@ class SolverHandler:
                         "(limiting_inequality_constraint)",
                         nums.limiting_inequality_constraint,
                     )
+                    process_output.ovarre(
+                        output_file,
+                        "Plasma power-balance loss reference",
+                        "ppb_loss_reference",
+                        nums.ppb_loss_reference,
+                    )
             if problem_type == SolverProblemType.FULLY_CONSTRAINED:
                 if nums.sqsumsq >= 1.0e-2:
                     string = (

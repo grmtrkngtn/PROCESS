@@ -291,6 +291,8 @@ def constraint_equation_2(constraint_registration, data):
                 f"Unknown PlasmaIgnitionModel: {data.physics.i_plasma_ignited}"
             )
 
+    data.numerics.ppb_loss_reference = p_plasma_loss
+
     return eq(p_plasma_loss, p_plasma_heating, constraint_registration)
 
 
