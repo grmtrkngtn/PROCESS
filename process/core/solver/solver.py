@@ -443,6 +443,11 @@ class ScipySLSQP(_Solver):
     3. Equality-residual recovery: minimise the RMSE of PROCESS's already-
        normalised equality residuals, retaining constraint 30 as a domain guard.
 
+    Stage 1 now tries the nominal control guess, optional fuelling-only guesses,
+    then reproducible Sobol interior guesses before proceeding to Stage 2.
+    Stage 2 and Stage 3 each run at most once; the former post-fallback adaptive
+    multistart wrapper has been removed.
+
     Performance changes relative to the original experimental implementation:
 
     * only the primary finite-difference step is tried at each stage;
@@ -460,13 +465,13 @@ class ScipySLSQP(_Solver):
     EQ_MAXITER = 50
     RESIDUAL_MAXITER = 100
 
-    # Adaptive multistart wrapper around the unchanged robust solve:
-    #   try 1: nominal controls
-    #   try 2: first interior Sobol start, only after governing failure
-    #   try 3: second interior Sobol start, only if tries 1 and 2 disagree
-    #          in physical classification. A feasible second try stops early.
-    ADAPTIVE_SOBOL_SEED = 1729
-    ADAPTIVE_SOBOL_INTERIOR_MARGIN = 0.10
+    # Retry the FULLY constrained Stage 1 before Stage 2/3 fallback.
+    # 1 nominal start + up to 2 fuelling-only starts + 2 Sobol starts.
+    # Fuelling-only starts are used only if a fuel iteration variable exists.
+    STAGE1_FUEL_FRACTIONS = (0.25, 0.75)
+    STAGE1_N_SOBOL_STARTS = 2
+    STAGE1_SOBOL_SEED = 1729
+    STAGE1_SOBOL_INTERIOR_MARGIN = 0.10
 
     def __init__(self, *, data: DataStructure):
         super().__init__(data=data)
@@ -496,139 +501,92 @@ class ScipySLSQP(_Solver):
         self._stage3_best_x: np.ndarray | None = None
         self._stage3_best_eq_rmse: float | None = None
 
-    def _adaptive_sobol_starts(
+    def _stage1_start_points(
         self,
         nominal_x: np.ndarray,
         bndl: np.ndarray,
         bndu: np.ndarray,
-    ) -> list[np.ndarray]:
-        """Return two reproducible interior Sobol control starts."""
+    ) -> list[tuple[str, np.ndarray]]:
+        """Build deterministic Stage-1 starts in solver-scaled control space.
+
+        The input physics, uncertainty realisation, active iteration variables,
+        constraints and bounds are unchanged. Only the *initial guesses* for
+        the active iteration variables differ.
+
+        Start with nominal; if a fuel-named active variable exists, vary only
+        its initial value to two fractions of its bounds. Finally add interior
+        scrambled-Sobol starts spanning all finitely bounded controls.
+        """
         nominal = np.asarray(nominal_x, dtype=float).copy()
+        starts = [("nominal", nominal)]
         if nominal.size == 0:
-            return []
-
-        sampler = qmc.Sobol(
-            d=nominal.size,
-            scramble=True,
-            seed=self.ADAPTIVE_SOBOL_SEED,
-        )
-        # Exactly two extra starts.
-        unit_points = sampler.random_base2(m=1)
-
-        margin = float(self.ADAPTIVE_SOBOL_INTERIOR_MARGIN)
-        if not 0.0 <= margin < 0.5:
-            raise ProcessValueError(
-                "ADAPTIVE_SOBOL_INTERIOR_MARGIN must satisfy 0 <= margin < 0.5"
-            )
-        unit_points = margin + (1.0 - 2.0 * margin) * unit_points
+            return starts
 
         finite_box = np.isfinite(bndl) & np.isfinite(bndu) & (bndu > bndl)
 
-        starts = []
-        for unit_point in unit_points:
-            x_start = nominal.copy()
-            x_start[finite_box] = bndl[finite_box] + unit_point[finite_box] * (
-                bndu[finite_box] - bndl[finite_box]
+        def add_start(label: str, candidate: np.ndarray):
+            candidate = np.clip(np.asarray(candidate, dtype=float), bndl, bndu)
+            if not any(np.array_equal(candidate, previous) for _, previous in starts):
+                starts.append((label, candidate.copy()))
+
+        # Prioritise the control that exposed this issue. The diagnostic
+        # name comes from the active iteration variable label, not from
+        # a hard-coded variable index (which could change with IXC).
+        try:
+            active_codes = self.data.numerics.ixc[: nominal.size]
+            names = [
+                str(self.data.numerics.lablxc[int(code) - 1]).lower()
+                for code in active_codes
+            ]
+        except (AttributeError, IndexError, TypeError, ValueError):
+            names = []
+
+        fuel_indices = [
+            i for i, name in enumerate(names)
+            if "fuel" in name and finite_box[i]
+        ]
+        if fuel_indices:
+            fuel_idx = fuel_indices[0]
+            print(f"Stage 1 targeted multistart control: {names[fuel_idx]}")
+            for fraction in self.STAGE1_FUEL_FRACTIONS:
+                candidate = nominal.copy()
+                candidate[fuel_idx] = (
+                    bndl[fuel_idx]
+                    + float(fraction) * (bndu[fuel_idx] - bndl[fuel_idx])
+                )
+                add_start(f"fuelling {fraction:.0%}", candidate)
+        else:
+            print("Stage 1: no active, finitely bounded fuelling control identified")
+
+        n_sobol = int(self.STAGE1_N_SOBOL_STARTS)
+        if n_sobol < 0:
+            raise ProcessValueError("STAGE1_N_SOBOL_STARTS must be non-negative")
+        if n_sobol:
+            margin = float(self.STAGE1_SOBOL_INTERIOR_MARGIN)
+            if not 0.0 <= margin < 0.5:
+                raise ProcessValueError(
+                    "STAGE1_SOBOL_INTERIOR_MARGIN must satisfy 0 <= margin < 0.5"
+                )
+
+            sampler = qmc.Sobol(
+                d=nominal.size,
+                scramble=True,
+                seed=self.STAGE1_SOBOL_SEED,
             )
-            starts.append(x_start)
+            n_power_two = 1 << (n_sobol - 1).bit_length()
+            unit_points = sampler.random_base2(m=n_power_two.bit_length() - 1)
+            unit_points = margin + (1.0 - 2.0 * margin) * unit_points
+
+            for i, unit_point in enumerate(unit_points[:n_sobol], start=1):
+                candidate = nominal.copy()
+                candidate[finite_box] = (
+                    bndl[finite_box]
+                    + unit_point[finite_box]
+                    * (bndu[finite_box] - bndl[finite_box])
+                )
+                add_start(f"Sobol {i}", candidate)
 
         return starts
-
-    @staticmethod
-    def _finite_or_inf(value: float) -> float:
-        try:
-            value = float(value)
-        except (TypeError, ValueError):
-            return np.inf
-        return value if np.isfinite(value) else np.inf
-
-    def _adaptive_result_score(self) -> tuple[float, ...]:
-        """Rank completed robust solves by UQ-relevant physical outcome."""
-        problem_type = int(self.data.numerics.solver_problem_type)
-        eq_rmse = self._finite_or_inf(self.data.numerics.equality_residual_rmse)
-        eq_max = self._finite_or_inf(self.data.numerics.equality_residual_max)
-
-        # feasible < requirement failure < governing failure
-        if problem_type == 0:
-            return (0.0, eq_rmse, eq_max)
-
-        if problem_type == 1:
-            # The UQ response uses the maximum one-sided inequality violation.
-            ineq_max = self._finite_or_inf(self.data.numerics.inequality_violation_max)
-            ineq_rmse = self._finite_or_inf(self.data.numerics.inequality_violation_rmse)
-            return (1.0, ineq_max, ineq_rmse, eq_rmse, eq_max)
-
-        if problem_type == 2:
-            return (2.0, eq_rmse, eq_max)
-
-        return (3.0, eq_rmse, eq_max)
-
-    def _snapshot_adaptive_result(self, label: str) -> dict:
-        """Capture one completed robust solve so it can be restored later."""
-        return {
-            "label": label,
-            "score": self._adaptive_result_score(),
-            "problem_type": int(self.data.numerics.solver_problem_type),
-            "x": np.asarray(self.x, dtype=float).copy(),
-            "objf": self.objf,
-            "info": self.info,
-            "equality_residual_rmse": float(self.data.numerics.equality_residual_rmse),
-            "equality_residual_max": float(self.data.numerics.equality_residual_max),
-            "inequality_violation_rmse": float(
-                self.data.numerics.inequality_violation_rmse
-            ),
-            "inequality_violation_max": float(
-                self.data.numerics.inequality_violation_max
-            ),
-            "minimum_inequality_margin": float(
-                self.data.numerics.minimum_inequality_margin
-            ),
-            "limiting_inequality_constraint": int(
-                self.data.numerics.limiting_inequality_constraint
-            ),
-            "n_solver_iterations": int(self.data.numerics.n_solver_iterations),
-        }
-
-    def _restore_adaptive_result(self, snapshot: dict):
-        """Restore PROCESS output state to the selected adaptive result."""
-        problem_type = int(snapshot["problem_type"])
-        x = np.asarray(snapshot["x"], dtype=float)
-
-        self.data.numerics.solver_problem_type = problem_type
-
-        if problem_type in (0, 1):
-            self._set_final_state(x, objf=snapshot["objf"])
-        else:
-            # Governing failure is deliberately equality-only.
-            self._invalidate_cache()
-            _, eq_conf = self._evaluate_state(
-                x,
-                m_eval=self.meq,
-                force=True,
-            )
-            eq = np.asarray(eq_conf[: self.meq], dtype=float)
-            self.x = x.copy()
-            self.objf = snapshot["objf"]
-            self.conf = np.full(self.m, np.nan, dtype=float)
-            self.conf[: self.meq] = eq
-
-        self.info = snapshot["info"]
-        self.data.numerics.solver_problem_type = problem_type
-        self.data.numerics.equality_residual_rmse = snapshot["equality_residual_rmse"]
-        self.data.numerics.equality_residual_max = snapshot["equality_residual_max"]
-        self.data.numerics.inequality_violation_rmse = snapshot[
-            "inequality_violation_rmse"
-        ]
-        self.data.numerics.inequality_violation_max = snapshot[
-            "inequality_violation_max"
-        ]
-        self.data.numerics.minimum_inequality_margin = snapshot[
-            "minimum_inequality_margin"
-        ]
-        self.data.numerics.limiting_inequality_constraint = snapshot[
-            "limiting_inequality_constraint"
-        ]
-        self.data.numerics.n_solver_iterations = snapshot["n_solver_iterations"]
 
     def _invalidate_cache(self):
         self._cache_x = None
@@ -909,10 +867,13 @@ class ScipySLSQP(_Solver):
             name = self.data.numerics.lablxc[number - 1]
             print(f"{xnorm:.3f}: {number}, {name}")
 
-    def _run_full_solve(self, constraints, finite_diff_step, x_start):
+    def _run_full_solve(
+        self, constraints, finite_diff_step, x_start, *, reset_recovery_candidate=True
+    ):
         self.iteration = 0
         self._invalidate_cache()
-        self._reset_stage1_recovery_candidate()
+        if reset_recovery_candidate:
+            self._reset_stage1_recovery_candidate()
 
         # The starting point is also a legitimate recovery candidate.
         try:
@@ -1142,110 +1103,8 @@ class ScipySLSQP(_Solver):
         print(f"\nTotal robust SLSQP duration: {duration:.3f} s")
 
     def solve(self) -> SolverOutputCondition:
-        """Run the robust solver with adaptive multistart verification.
-
-        Strategy
-        --------
-        1. Run the original robust Stage 1 -> 2 -> 3 chain from the nominal
-           controls.
-        2. If it returns feasible or requirement failure, accept it.
-        3. If it returns governing failure, run one additional robust chain from
-           a fixed interior Sobol control start.
-        4. If the second try is feasible, accept it immediately.
-        5. If tries 1 and 2 disagree in physical class, run the second Sobol
-           start as an adjudicating third try.
-        6. Select the best physical outcome across the tries actually performed.
-
-        This keeps the original robust solver unchanged internally and spends
-        extra PROCESS solves only where local-basin sensitivity matters.
-        """
-        adaptive_start_time = time.time()
-
-        nominal_x = np.asarray(self.x_0, dtype=float).copy()
-
-        bndl = np.asarray(self.bndl, dtype=float).copy()
-        bndu = np.asarray(self.bndu, dtype=float).copy()
-        if not (np.all(self.ilower) and np.all(self.iupper)):
-            bndl[self.ilower == 0] = -np.inf
-            bndu[self.iupper == 0] = np.inf
-
-        nominal_x = np.clip(nominal_x, bndl, bndu)
-        sobol_starts = self._adaptive_sobol_starts(nominal_x, bndl, bndu)
-
-        snapshots: list[dict] = []
-
-        print("\n=== Adaptive robust solve: nominal try ===")
-        self._solve_single_robust_try(nominal_x)
-        nominal_result = self._snapshot_adaptive_result("nominal")
-        snapshots.append(nominal_result)
-
-        # Most UQ points stop here.
-        if nominal_result["problem_type"] != 2:
-            print(
-                "\nAdaptive multistart not triggered: nominal solve recovered "
-                "the governing equations."
-            )
-            print(
-                f"Total adaptive robust duration: "
-                f"{time.time() - adaptive_start_time:.3f} s"
-            )
-            return self.info
-
-        print(
-            "\nNominal solve ended in governing failure; "
-            "running Sobol verification start 1."
-        )
-        self._solve_single_robust_try(sobol_starts[0])
-        sobol_1 = self._snapshot_adaptive_result("Sobol 1")
-        snapshots.append(sobol_1)
-
-        # A feasible solution proves existence; no third solve is useful.
-        if sobol_1["problem_type"] == 0:
-            print(
-                "\nSobol 1 found a feasible control solution; "
-                "stopping adaptive verification."
-            )
-        # If both first attempts give the same physical class, accept the
-        # agreement and avoid a third full robust solve.
-        elif sobol_1["problem_type"] == nominal_result["problem_type"]:
-            print(
-                "\nNominal and Sobol 1 agree in physical classification; "
-                "third start not required."
-            )
-        else:
-            print(
-                "\nNominal and Sobol 1 disagree in physical classification; "
-                "running Sobol verification start 2."
-            )
-            self._solve_single_robust_try(sobol_starts[1])
-            snapshots.append(self._snapshot_adaptive_result("Sobol 2"))
-
-        best = min(snapshots, key=lambda item: item["score"])
-
-        print("\n=== Adaptive robust summary ===")
-        for snapshot in snapshots:
-            marker = "  <-- selected" if snapshot is best else ""
-            print(
-                f"{snapshot['label']}: "
-                f"problem_type={snapshot['problem_type']}, "
-                f"score={snapshot['score']}{marker}"
-            )
-
-        # The selected result may not be the last try performed.
-        self._restore_adaptive_result(best)
-
-        print(f"Selected adaptive result: {best['label']}")
-        print(
-            f"Total adaptive robust duration: {time.time() - adaptive_start_time:.3f} s"
-        )
-        return self.info
-
-    def _solve_single_robust_try(
-        self,
-        x_start: np.ndarray,
-    ) -> SolverOutputCondition:
-        """Run the original three-stage robust solve from one control start."""
-        self.x_0 = np.asarray(x_start, dtype=float).copy()
+        """Run Stage-1 multistart, then one Stage-2/3 fallback chain if needed."""
+        self.x_0 = np.asarray(self.x_0, dtype=float).copy()
         self.n = self.x_0.shape[0]
 
         # Respect inactive bounds in the same way as the original implementation.
@@ -1290,35 +1149,98 @@ class ScipySLSQP(_Solver):
         start_time = time.time()
 
         # ------------------------------------------------------------------
-        # Stage 1: normal full constrained PROCESS solve.
+        # Stage 1: retry the original full constrained objective from several
+        # initial control vectors before giving up and entering Stage 2.
+        # The same physics inputs, active constraints, bounds and objective
+        # are used in every attempt. Each restart has a fresh SLSQP history.
         # ------------------------------------------------------------------
-        print("\n=== Stage 1: full equality + inequality constrained SLSQP ===")
+        print("\n=== Stage 1: multistart full equality + inequality constrained SLSQP ===")
         print(f"finite diff step = {finite_diff_step}")
         self.data.numerics.solver_problem_type = 0
-        result_full = self._run_full_solve(constraints, finite_diff_step, self.x_0)
 
-        if result_full is not None and result_full.success:
-            self._set_final_state(result_full.x)
-            self._print_final_metrics("Stage 1 converged")
-            self.info = SolverOutputCondition.CONVERGED
-            self.data.numerics.n_solver_iterations = result_full.nit
-            self._report_duration(start_time)
-            return self.info
+        stage1_starts = self._stage1_start_points(self.x_0, bndl, bndu)
+        self._reset_stage1_recovery_candidate()
+        last_result_full = None
+        print(f"Stage 1 will attempt up to {len(stage1_starts)} initial guesses")
 
-        # Start Stage 2 from the best *recovery* point visited during Stage 1,
-        # not merely the terminal SLSQP point.
+        for start_index, (label, x_start) in enumerate(stage1_starts, start=1):
+            print(f"\n--- Stage 1 attempt {start_index}/{len(stage1_starts)} ({label}) ---")
+            result_full = self._run_full_solve(
+                constraints,
+                finite_diff_step,
+                x_start,
+                reset_recovery_candidate=False,
+            )
+            last_result_full = result_full
+
+            # A successful SciPy termination must still be checked against
+            # PROCESS constraints. Nonconverged but feasible points remain
+            # recovery candidates; do not label them a successful Stage 1
+            # optimisation of the user's original objective.
+            candidates = []
+            if result_full is not None and hasattr(result_full, "x"):
+                candidates.append(("terminal", np.asarray(result_full.x, dtype=float)))
+            if self._stage1_best_x is not None:
+                candidates.append(("best visited", self._stage1_best_x.copy()))
+
+            for candidate_label, candidate_x in candidates:
+                try:
+                    self._set_final_state(candidate_x)
+                    eq_rmse, eq_max, ineq_rmse, ineq_max = (
+                        self._update_residual_diagnostics()
+                    )
+                except (ValueError, ProcessValueError, RuntimeError) as exc:
+                    print(f"Stage 1 {candidate_label} validation failed: {exc}")
+                    continue
+
+                verified_feasible = (
+                    np.isfinite(eq_max)
+                    and np.isfinite(ineq_max)
+                    and eq_max <= max(self.EQ_CONSTRAINT_TOL, self.SOLVER_TOL)
+                    and ineq_max <= self.INEQ_CONSTRAINT_TOL
+                )
+                if verified_feasible:
+                    if not (
+                        candidate_label == "terminal"
+                        and result_full is not None
+                        and result_full.success
+                    ):
+                        # Useful for Stage-2 recovery, but do not mistake a
+                        # merely feasible iterate for a converged Stage-1
+                        # optimisation of the user's original objective.
+                        print(
+                            f"Stage 1 {candidate_label} point is feasible, "
+                            "but the original objective solve did not converge"
+                        )
+                        continue
+
+                    print(f"Stage 1 converged and verified from {label}")
+                    self._print_final_metrics("Stage 1 verified converged solution")
+                    self.info = SolverOutputCondition.CONVERGED
+                    self.data.numerics.n_solver_iterations = int(result_full.nit)
+                    self._report_duration(start_time)
+                    return self.info
+
+            if result_full is not None and result_full.success:
+                print(
+                    "Stage 1 reported SciPy success, but the returned point "
+                    "failed direct constraint verification; trying next start"
+                )
+
+        # Only now enter Stage 2. Crucially, we retain the best recovery
+        # candidate visited across *all* Stage-1 starts, not the final start.
         if self._stage1_best_x is not None:
             stage_2_start = self._stage1_best_x.copy()
             metrics = self._stage1_best_metrics or {}
             print(
-                "Stage 2 start: best Stage-1 recovery candidate "
+                "Stage 2 start: best recovery candidate across all Stage-1 attempts "
                 f"(equalities_recovered={metrics.get('equalities_recovered')}, "
                 f"eq_rmse={metrics.get('equality_rmse', np.nan):.3e}, "
                 f"ineq_rmse={metrics.get('inequality_rmse', np.nan):.3e})"
             )
-        elif result_full is not None and hasattr(result_full, "x"):
-            stage_2_start = np.asarray(result_full.x, dtype=float).copy()
-            print("Stage 2 start: Stage-1 terminal point (no valid tracked candidate)")
+        elif last_result_full is not None and hasattr(last_result_full, "x"):
+            stage_2_start = np.asarray(last_result_full.x, dtype=float).copy()
+            print("Stage 2 start: last Stage-1 terminal point (no valid tracked candidate)")
         else:
             stage_2_start = self.x_0.copy()
             print("Stage 2 start: original x0 (Stage 1 returned no usable point)")

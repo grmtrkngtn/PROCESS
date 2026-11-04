@@ -14,7 +14,7 @@ permissions:
   id-token: write
 
 env:
-  python-version: '3.11'
+  python-version: "3.11"
 
 jobs:
   unit-test:
@@ -178,7 +178,7 @@ jobs:
 
       - name: Get information about the current run
         if: failure()
-        uses: Fusion-Power-Plant-Framework/fppf-actions/get-workflow-origin@a6dd369021515269789428796f491a0fa67ea6f5
+        uses: Fusion-Power-Plant-Framework/fppf-actions/get-workflow-origin@12d5284c9baf30770e46880c8d4350928e540212
         id: workflow-run-info
       - name: Checkout and lint on main
         # check out main
@@ -224,7 +224,6 @@ jobs:
 
             To check what these are, run `hatch run lint:fmt_extra` on your branch and on main
           edit-mode: replace
-
 
   tracking:
     # update tracker to include the MFILEs created by the run-tracking-inputs job
