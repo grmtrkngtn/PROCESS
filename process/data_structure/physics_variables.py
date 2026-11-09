@@ -1288,6 +1288,9 @@ class PhysicsData:
     p_plasma_separatrix_mw: float = 0.0
     """power to conducted to the divertor region (MW)"""
 
+    p_plasma_separatrix_raw_mw: float = 0.0
+    """power to conducted to the divertor region (MW)"""
+
     p_plasma_separatrix_rmajor_mw: float = 0.0
     """Power to conducted to the divertor region per major radius (MW/m)"""
 

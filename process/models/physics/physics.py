@@ -792,89 +792,6 @@ class Physics(Model):
         # Calculate L- to H-mode power threshold for different scalings
         self.plasma_transition.run()
 
-        # Power transported to the divertor by charged particles,
-        # i.e. excludes neutrons and radiation, and also NBI orbit loss power,
-        # which is assumed to be absorbed by the first wall
-        pinj = (
-            self.data.current_drive.p_hcd_injected_total_mw
-            if PlasmaIgnitionModel(self.data.physics.i_plasma_ignited)
-            == PlasmaIgnitionModel.NON_IGNITED
-            else 0.0
-        )
-
-        self.data.physics.p_plasma_separatrix_mw = (
-            self.exhaust.calculate_separatrix_power(
-                f_p_alpha_plasma_deposited=self.data.physics.f_p_alpha_plasma_deposited,
-                p_alpha_total_mw=self.data.physics.p_alpha_total_mw,
-                p_non_alpha_charged_mw=self.data.physics.p_non_alpha_charged_mw,
-                p_hcd_injected_total_mw=pinj,
-                p_plasma_ohmic_mw=self.data.physics.p_plasma_ohmic_mw,
-                p_plasma_rad_mw=self.data.physics.p_plasma_rad_mw,
-            )
-        )
-
-        self.data.physics.p_plasma_separatrix_rmajor_mw = (
-            self.exhaust.calculate_psep_over_r_metric(
-                p_plasma_separatrix_mw=self.data.physics.p_plasma_separatrix_mw,
-                rmajor=self.data.physics.rmajor,
-            )
-        )
-
-        self.data.physics.p_div_bt_q_aspect_rmajor_mw = (
-            self.exhaust.calculate_eu_demo_re_attachment_metric(
-                p_plasma_separatrix_mw=self.data.physics.p_plasma_separatrix_mw,
-                b_plasma_toroidal_on_axis=self.data.physics.b_plasma_toroidal_on_axis,
-                q95=self.data.physics.q95,
-                aspect=self.data.physics.aspect,
-                rmajor=self.data.physics.rmajor,
-            )
-        )
-
-        # ===============================
-
-        # Calculate scrape-off layer physics
-
-        self.scrape_off_layer.run()
-
-        # ===============================
-        self.data.physics.pflux_plasma_surface_neutron_avg_mw = (
-            self.data.physics.p_neutron_total_mw / self.data.physics.a_plasma_surface
-        )
-
-        # KLUDGE: Ensure p_plasma_separatrix_mw is continuously positive
-        # (physical, rather than negative potential power),
-        # as required by other models (e.g.
-        # Physics.calculate_density_limit())
-        self.data.physics.p_plasma_separatrix_mw /= 1 - np.exp(
-            -self.data.physics.p_plasma_separatrix_mw
-        )
-
-        # if double null configuration share the power
-        # over the upper and lower divertor, where
-        # self.data.physics.f_p_div_lower_separatrix gives the factor of power conducted
-        # to the lower divertor
-        if self.data.divertor.n_divertors == 2:
-            self.data.physics.p_div_lower_separatrix_mw = (
-                self.data.physics.f_p_div_lower_separatrix
-                * self.data.physics.p_plasma_separatrix_mw
-            )
-            self.data.physics.p_div_upper_separatrix_mw = (
-                1.0e0 - self.data.physics.f_p_div_lower_separatrix
-            ) * self.data.physics.p_plasma_separatrix_mw
-            self.data.physics.p_div_separatrix_max_mw = max(
-                self.data.physics.p_div_lower_separatrix_mw,
-                self.data.physics.p_div_upper_separatrix_mw,
-            )
-
-        # Resistive diffusion time = current penetration time ~ mu0.a^2/resistivity
-        self.data.physics.t_plasma_res_diffusion = res_diff_time(
-            self.data.physics.rmajor,
-            self.data.physics.res_plasma,
-            self.data.physics.kappa95,
-        )
-
-        self.density_limit.run()
-
         # Calculate transport losses and energy confinement time using the
         # chosen scaling law
         confinement_time_data = self.confinement.calculate_confinement_time(
@@ -930,6 +847,82 @@ class Physics(Model):
         self.data.physics.p_ion_transport_loss_mw = (
             self.data.physics.pden_ion_transport_loss_mw * self.data.physics.vol_plasma
         )
+
+        # Total transport power from scaling law (MW)
+        self.data.physics.pscalingmw = (
+            self.data.physics.p_electron_transport_loss_mw
+            + self.data.physics.p_ion_transport_loss_mw
+        )
+
+        # Core-to-edge power flow for i_rad_loss = 1:
+        # pscalingmw is the confinement-derived thermal transport out of the core.
+        # Edge radiation reduces this power before it crosses the separatrix.
+        self.data.physics.p_plasma_separatrix_raw_mw = (
+            self.data.physics.pscalingmw - self.data.physics.p_plasma_edge_rad_mw
+        )
+
+        # Numerical positivity regularisation for downstream physics.
+        # This does NOT make a negative raw edge power budget physically valid.
+        # Preserve the original PROCESS transformation to minimise changes.
+        psep_raw = self.data.physics.p_plasma_separatrix_raw_mw
+        self.data.physics.p_plasma_separatrix_mw = psep_raw / (1.0 - np.exp(-psep_raw))
+        self.data.physics.p_plasma_separatrix_mw = (
+            self.data.physics.p_plasma_separatrix_raw_mw
+        )
+
+        self.data.physics.p_plasma_separatrix_rmajor_mw = (
+            self.exhaust.calculate_psep_over_r_metric(
+                p_plasma_separatrix_mw=self.data.physics.p_plasma_separatrix_mw,
+                rmajor=self.data.physics.rmajor,
+            )
+        )
+
+        self.data.physics.p_div_bt_q_aspect_rmajor_mw = (
+            self.exhaust.calculate_eu_demo_re_attachment_metric(
+                p_plasma_separatrix_mw=self.data.physics.p_plasma_separatrix_mw,
+                b_plasma_toroidal_on_axis=self.data.physics.b_plasma_toroidal_on_axis,
+                q95=self.data.physics.q95,
+                aspect=self.data.physics.aspect,
+                rmajor=self.data.physics.rmajor,
+            )
+        )
+
+        # ===============================
+
+        # Calculate scrape-off layer physics
+
+        self.scrape_off_layer.run()
+
+        # ===============================
+        self.data.physics.pflux_plasma_surface_neutron_avg_mw = (
+            self.data.physics.p_neutron_total_mw / self.data.physics.a_plasma_surface
+        )
+
+        # if double null configuration share the power
+        # over the upper and lower divertor, where
+        # self.data.physics.f_p_div_lower_separatrix gives the factor of power conducted
+        # to the lower divertor
+        if self.data.divertor.n_divertors == 2:
+            self.data.physics.p_div_lower_separatrix_mw = (
+                self.data.physics.f_p_div_lower_separatrix
+                * self.data.physics.p_plasma_separatrix_mw
+            )
+            self.data.physics.p_div_upper_separatrix_mw = (
+                1.0e0 - self.data.physics.f_p_div_lower_separatrix
+            ) * self.data.physics.p_plasma_separatrix_mw
+            self.data.physics.p_div_separatrix_max_mw = max(
+                self.data.physics.p_div_lower_separatrix_mw,
+                self.data.physics.p_div_upper_separatrix_mw,
+            )
+
+        # Resistive diffusion time = current penetration time ~ mu0.a^2/resistivity
+        self.data.physics.t_plasma_res_diffusion = res_diff_time(
+            self.data.physics.rmajor,
+            self.data.physics.res_plasma,
+            self.data.physics.kappa95,
+        )
+
+        self.density_limit.run()
 
         # Calculate Volt-second requirements
         (
@@ -989,12 +982,6 @@ class Physics(Model):
                 t_energy_confinement=self.data.physics.t_energy_confinement,
                 temp_plasma_electrons_vol_avg_kev=self.data.physics.temp_plasma_electron_vol_avg_kev,
             )
-        )
-
-        # Total transport power from scaling law (MW)
-        self.data.physics.pscalingmw = (
-            self.data.physics.p_electron_transport_loss_mw
-            + self.data.physics.p_ion_transport_loss_mw
         )
 
         # ============================================================
