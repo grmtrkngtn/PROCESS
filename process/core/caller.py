@@ -299,10 +299,9 @@ class Caller:
 
         # Machine Build Model
         # Radial build
-        self.models.build.run()
 
         self.models.physics.run()
-
+        self.models.build.run()
         # Toroidal field coil model
 
         # Toroidal field coil resistive model
@@ -400,7 +399,7 @@ class Caller:
         1    |  2015 Kovari model
         2    |  Custom model
         """
-        self.models.costs.run()
+        # self.models.costs.run()
 
         # FISPACT and LOCA model (not used)- removed
 
