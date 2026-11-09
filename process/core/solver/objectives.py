@@ -111,27 +111,22 @@ def objective_function(i_figure_merit: int, data: DataStructure) -> float:
         case FiguresOfMerit.MIN_INEQ_CONSTRAINT_VIOLATION:
             start = data.numerics.n_equality_constraints
             end = start + data.numerics.n_inequality_constraints
-            inequality_residuals = np.asarray(
+
+            residuals = np.asarray(
                 data.numerics.constraint_residuals_normalised[start:end],
                 dtype=float,
             )
 
-            # PROCESS convention:
-            #   residual >= 0 : satisfied
-            #   residual <  0 : violated
-            #
-            # Only actual violations contribute.
-            violations = np.maximum(-inequality_residuals, 0.0)
+            if not np.all(np.isfinite(residuals)):
+                raise ProcessValueError(
+                    "Non-finite inequality residual in feasibility objective"
+                )
 
-            # L8 norm used in the earlier UQ study:
-            #
-            #     J8 = (sum(v_i**8))**(1/8)
-            #
-            # This strongly weights the largest violation while still retaining
-            # information from all violated constraints.
-            objective_metric = (
-                float(np.linalg.norm(violations, ord=8)) if violations.size > 0 else 0.0
-            )
+            violations = np.maximum(-residuals, 0.0)
+
+            # Smooth, non-negative feasibility restoration objective.
+            # Zero if and only if all inequalities are satisfied.
+            objective_metric = 0.5 * float(np.dot(violations, violations))
 
         case FiguresOfMerit.SIGNED_MIN_INEQ_MARGIN:
             start = data.numerics.n_equality_constraints
