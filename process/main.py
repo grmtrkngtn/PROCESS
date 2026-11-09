@@ -888,7 +888,7 @@ class Models:
         # 0    |  1990 costs model
         # 1    |  2015 Kovari model
         # 2    |  Custom model
-        self.costs.output()
+        # self.costs.output()
 
         # Availability model
         self.availability.output()
