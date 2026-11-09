@@ -43,7 +43,7 @@ boundu(4) = 12.0
 ixc = 6 * nd_plasma_electrons_vol_avg
 boundl(6) = 1.0e19
 boundu(6) = 1.0e20
-ixc = 177 * molflow_plasma_fuelling_required
+ixc = 178 * molflow_plasma_fuelling_required
 ixc = 2 * bt
 boundl(2) = 3.5
 boundu(2) = 4.5
@@ -192,7 +192,7 @@ f_nd_impurity_electrons(10) = 0.0
 f_nd_impurity_electrons(11) = 0.0
 f_nd_impurity_electrons(12) = 0.0
 f_nd_impurity_electrons(13) = 0.0006366773569620794
-f_nd_impurity_electrons(14) = 5e-06
+f_nd_impurity_electrons(14) = 5e-04
 
 *--------------Neoclassics Variables---------------*
 
