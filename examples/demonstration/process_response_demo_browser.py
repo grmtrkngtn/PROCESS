@@ -106,7 +106,7 @@ def _(mo):
 This version runs **in your browser**, without a Python server or a PROCESS installation.
 Use the heating, fuelling, and impurity-seeding sliders to explore the **precomputed PROCESS results**.
 The plotted figures were generated from PROCESS in advance; changing a slider selects the
-corresponding result rather than rerunning PROCESS. This avoids server-session and GitHub API limits.
+corresponding result rather than rerunning PROCESS.
 """)
 
 
