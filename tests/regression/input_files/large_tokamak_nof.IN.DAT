@@ -19,7 +19,7 @@ epsvmc = 1e-7
 
 * Number of equality constraints
 * (the first n_equality_constraints icc=... statements are equality constraints)
-n_equality_constraints = 3
+n_equality_constraints = 2
 
 * Maximum number of solver iterations
 maxcal = 100
@@ -37,9 +37,9 @@ icc = 11
 
 * Constraint Equations - Limit Equations *
 ******************************************
-icc = 93
-ixc = 178
-molflow_plasma_fuelling = 3.0e+21
+*icc = 93
+*ixc = 178
+*molflow_plasma_fuelling = 3.0e+21
 
 
 * Injection power upper limit *
@@ -443,7 +443,7 @@ p_hcd_primary_extra_heat_mw = 75.0
 radius_plasma_core_norm = 0.75
 
 * fraction of radiation from 'core' region that is subtracted
-f_p_plasma_core_rad_reduction = 0.6
+f_p_plasma_core_rad_reduction = 1.0
 
 * impurity array
 f_nd_impurity_electrons(1) = 0.9
@@ -459,7 +459,7 @@ f_nd_impurity_electrons(10) = 0.0
 f_nd_impurity_electrons(11) = 0.0
 f_nd_impurity_electrons(12) = 0.0
 f_nd_impurity_electrons(13) = 0.00038
-f_nd_impurity_electrons(14) = 0.000005
+f_nd_impurity_electrons(14) = 0.00005
 
 * Heat transport *
 ******************

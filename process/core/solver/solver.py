@@ -464,6 +464,11 @@ class ScipySLSQP(_Solver):
 
         Both terms are updated by the existing PROCESS model evaluation. This
         avoids requiring an extra field or any modifications outside solver.py.
+
+        Raises
+        ------
+        ProcessValueError
+            If raw separatrix power is not finite.
         """
         physics = self.data.physics
         raw = float(physics.pscalingmw - physics.p_plasma_edge_rad_mw)
@@ -523,8 +528,7 @@ class ScipySLSQP(_Solver):
 
     def _active_constraint_ids(self) -> np.ndarray:
         """PROCESS orders active equalities before active inequalities."""
-        ids = np.asarray(self.data.numerics.icc[: self.m], dtype=int)
-        return ids
+        return np.asarray(self.data.numerics.icc[: self.m], dtype=int)
 
     def _print_range_normalized_variables(self, x: np.ndarray) -> None:
         """Show each active x relative to its active bounds, without model calls."""
@@ -605,36 +609,40 @@ class ScipySLSQP(_Solver):
         print(f"\nIteration {self.iteration} [{stage}]")
 
         try:
-            if self._stage_name == "governing residual":
-                _, conf = self._evaluate(x, equality_only=True)
-                conf = np.asarray(conf, dtype=float)
-                eq = conf[: self.meq]
-                objective = float(np.sqrt(np.mean(eq**2))) if eq.size else 0.0
-                eq_max = float(np.max(np.abs(eq))) if eq.size else 0.0
-                print(f"  Stage objective:          {objective:.6e}")
-                print(f"  Equality RMSE:           {objective:.3e}")
-                print(f"  Equality max:            {eq_max:.3e}")
-                print("  Inequality viol. RMSE:   not evaluated")
-                print("  Inequality viol. max:    not evaluated")
-                self._print_constraint_details(conf, governing_only=True)
-            else:
-                objective, conf = self._evaluate(x)
-                conf = np.asarray(conf, dtype=float)
-                eq_rmse, eq_max, ineq_rmse, ineq_max = self._metrics(conf, self.meq)
-                n_violated = int(np.count_nonzero(conf[self.meq :] < 0.0))
-                print(f"  Stage objective:          {float(objective):.6e}")
-                print(f"  Equality RMSE:           {eq_rmse:.3e}")
-                print(f"  Equality max:            {eq_max:.3e}")
-                print(f"  Inequality viol. RMSE:   {ineq_rmse:.3e}")
-                print(f"  Inequality viol. max:    {ineq_max:.3e}")
-                print(f"  Violated inequalities:   {n_violated}")
-                self._print_constraint_details(conf)
+            self._print_iteration_diagnostics(x)
         except (ValueError, ProcessValueError, FloatingPointError, RuntimeError) as exc:
             print(f"  Constraint diagnostics unavailable: {exc}")
             logger.warning("SLSQP iteration diagnostic unavailable: %s", exc)
 
         # Does not call the physics model and does not modify the optimiser state.
         self._print_range_normalized_variables(x)
+
+    def _print_iteration_diagnostics(self, x: np.ndarray) -> None:
+        """Evaluate and display stage-specific constraint diagnostics."""
+        if self._stage_name == "governing residual":
+            _, conf = self._evaluate(x, equality_only=True)
+            conf = np.asarray(conf, dtype=float)
+            eq = conf[: self.meq]
+            objective = float(np.sqrt(np.mean(eq**2))) if eq.size else 0.0
+            eq_max = float(np.max(np.abs(eq))) if eq.size else 0.0
+            print(f"  Stage objective:          {objective:.6e}")
+            print(f"  Equality RMSE:           {objective:.3e}")
+            print(f"  Equality max:            {eq_max:.3e}")
+            print("  Inequality viol. RMSE:   not evaluated")
+            print("  Inequality viol. max:    not evaluated")
+            self._print_constraint_details(conf, governing_only=True)
+        else:
+            objective, conf = self._evaluate(x)
+            conf = np.asarray(conf, dtype=float)
+            eq_rmse, eq_max, ineq_rmse, ineq_max = self._metrics(conf, self.meq)
+            n_violated = int(np.count_nonzero(conf[self.meq :] < 0.0))
+            print(f"  Stage objective:          {float(objective):.6e}")
+            print(f"  Equality RMSE:           {eq_rmse:.3e}")
+            print(f"  Equality max:            {eq_max:.3e}")
+            print(f"  Inequality viol. RMSE:   {ineq_rmse:.3e}")
+            print(f"  Inequality viol. max:    {ineq_max:.3e}")
+            print(f"  Violated inequalities:   {n_violated}")
+            self._print_constraint_details(conf)
 
     @staticmethod
     def _stage1_starts(x0: np.ndarray, bounds: optimize.Bounds) -> list[np.ndarray]:
@@ -792,7 +800,8 @@ class ScipySLSQP(_Solver):
         self._write_diagnostics(self.conf, problem_type)
         eq_rmse, eq_max, ineq_rmse, ineq_max = self._metrics(self.conf, self.meq)
         print(
-            f"\nSelected SLSQP result: problem_type={problem_type}, converged={converged}, "
+            f"\nSelected SLSQP result: problem_type={problem_type}, "
+            f"converged={converged}, "
             f"eq_rmse={eq_rmse:.3e}, eq_max={eq_max:.3e}, "
             f"ineq_rmse={ineq_rmse:.3e}, ineq_max={ineq_max:.3e}"
         )
@@ -808,7 +817,14 @@ class ScipySLSQP(_Solver):
         return self.info
 
     def solve(self) -> SolverOutputCondition:
-        """Three Stage-1 starting points; one warm-started Stage 2 and Stage 3."""
+        """Run the three-stage SLSQP solve with bounded Stage-1 starts.
+
+        Raises
+        ------
+        ProcessValueError
+            If the finite-difference step is invalid or the final
+            governing-residual stage fails to return valid residuals.
+        """
         self._solve_started_at = time.perf_counter()
         self.n = len(self.x_0)
         lower = np.asarray(self.bndl, dtype=float).copy()
@@ -850,7 +866,7 @@ class ScipySLSQP(_Solver):
         equality_constraints = [eq_constraint, psep_domain]
         guard_constraints = ([guard] if guard is not None else []) + [psep_domain]
 
-        starts = self._stage1_starts(x0, self.bounds)[:1]
+        starts = self._stage1_starts(x0, self.bounds)
         print(
             "\n=== Jon's SciPy SLSQP (three starting points) ===\n"
             f"{self.n} iteration variables, {self.meq} equalities, "
@@ -882,7 +898,7 @@ class ScipySLSQP(_Solver):
             candidate = self._full_result(result)
             if candidate is None:
                 continue
-            eq_rmse, eq_max, ineq_rmse, ineq_max = candidate[3]
+            _, eq_max, _, ineq_max = candidate[3]
             print(
                 f"  Stage 1 candidate: eq_max={eq_max:.3e}, "
                 f"ineq_max={ineq_max:.3e}, "
@@ -1006,11 +1022,11 @@ class ScipySLSQP(_Solver):
         # promising available Stage 1/2 point. No finite-difference sweep.
         self._set_problem_type(2)
         stage3_start = stage2_start
-        if candidate2 is not None:
-            if best_stage1 is None or self._candidate_rank(
-                candidate2
-            ) < self._candidate_rank(best_stage1[0]):
-                stage3_start = candidate2[0].copy()
+        if candidate2 is not None and (
+            best_stage1 is None
+            or self._candidate_rank(candidate2) < self._candidate_rank(best_stage1[0])
+        ):
+            stage3_start = candidate2[0].copy()
         print("\nStage 3: one governing-residual minimisation")
         result3 = self._run_stage(
             "governing residual",
@@ -1027,13 +1043,13 @@ class ScipySLSQP(_Solver):
         try:
             _, eq_conf = self._evaluate(result3.x, equality_only=True)
             eq = np.asarray(eq_conf[: self.meq], dtype=float)
-            if eq.size != self.meq or not np.all(np.isfinite(eq)):
-                raise ProcessValueError("Stage 3 produced invalid governing residuals")
             raw_psep = self._raw_psep_from_state()
         except (ValueError, ProcessValueError, FloatingPointError, RuntimeError) as exc:
             raise ProcessValueError(
                 f"SLSQP Stage 3 final evaluation failed: {exc}"
             ) from exc
+        if eq.size != self.meq or not np.all(np.isfinite(eq)):
+            raise ProcessValueError("Stage 3 produced invalid governing residuals")
 
         x = np.asarray(result3.x, dtype=float).copy()
         if (

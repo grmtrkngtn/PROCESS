@@ -20,7 +20,7 @@ runtitle = EU-DEMO LAR 2023 baseline
 
 *--------------------------Numerics Variables---------------------------*
 
-epsvmc   = 1.0e-8 
+epsvmc   = 1.0e-5 
 * DESCRIPTION:   Error tolerance for VMCON
 * JUSTIFICATION: Same tolerance as used on on previous DEMO
 
@@ -28,7 +28,7 @@ i_process_run_mode  = 1
 * DESCRIPTION:   Code operation switch (1: VMCON)
 * JUSTIFICATION: Optimised run
 
-i_figure_merit   = -14 * Switch for figure-of-merit (see lablmm for descriptions)
+i_figure_merit   = -21 * Switch for figure-of-merit (see lablmm for descriptions)
 * 14: pulse length
 * DESCRIPTION:   Switch for Figure-of-Merit (1: Minimise major radius)
 * JUSTIFICATION: Aim to minimise major radius
@@ -129,7 +129,7 @@ icc = 60
 * DESCRIPTION:   OH coil temp margin
 * JUSTIFICATION: Constraint of CS engineering design
 
-icc = 62
+*icc = 62
 * DESCRIPTION:   taup/taueff ratio of particle to energy confinement times
 * JUSTIFICATION: Used to constrain helium fraction
 
@@ -170,7 +170,7 @@ boundl(3) = 8.00
 
 ixc = 4
 temp_plasma_electron_vol_avg_kev = 1.10022098489434761e+01
-boundu(4) = 150.0
+boundu(4) = 16.0
 * DESCRIPTION:   Volume averaged electron temperature (keV)
 * JUSTIFICATION: Iterate temperature to get solution
 
@@ -185,10 +185,12 @@ f_nd_plasma_electron_limit_max = 1.2
 * DESCRIPTION:   margin for density limit (used to set max greenwald fraction)
 * JUSTIFICATION: Used with icc=5 to enforce density limit
 
-*ixc = 11 * pheat
+ixc = 11 * pheat
 p_hcd_primary_extra_heat_mw = 10.0
 * DESCRIPTION:   heating power not used for current drive (MW)
 * JUSTIFICATION: Allows for optimsing current drive - helps with convergence   
+boundl(11) = 1.0e-3
+boundu(11) = 100.0
 
 ixc = 13 * dr_tf_inboard
 dr_tf_inboard = 9.99806743174200929e-01
@@ -297,12 +299,14 @@ f_nd_impurity_electrons(13) = 1.5e-04
 * JUSTIFICATION: Xenon impurity used based on DEMO-2018
 
 ixc = 178
-molflow_plasma_fuelling = 4.5e+21
+molflow_plasma_fuelling = 1.0e+21
 * DESCRIPTION:   Plasma fuelling rate
 * JUSTIFICATION: Use to find fuel-ion equillibrium.
 
+ixc = 136
+boundl(136) = 1.0e-6
+boundu(136) = 1.0e-4
 *scan_dim = 1
-
 *isweep = 11
 *nsweep = 82
 *sweep = 20.0, 19.0, 18.0, 17.0, 16.0, 15.0, 14.0, 13.0, 12.0, 11.0, 10.0 
@@ -338,7 +342,7 @@ ejima_coeff = 0.2
 * DESCRIPTION:   Ejima coefficient for resistive startup v-s formula
 * JUSTIFICATION:
 
-hfact = 1.1 
+hfact = 1.0 
 * DESCRIPTION:   H factor on energy confinement times (ixc=10)
 * JUSTIFICATION:
 
@@ -437,11 +441,11 @@ radius_plasma_pedestal_temp_norm = 0.94
 * DESCRIPTION:   R/a of temperature pedestal
 * JUSTIFICATION: 
 
-tbeta = 2.0
+tbeta = 1.13
 * DESCRIPTION:   Temperature profile index beta
 * JUSTIFICATION: 
 
-temp_plasma_pedestal_electron_kev = 4.199 
+temp_plasma_pedestal_electron_kev = 5.5
 * DESCRIPTION:   Electron temperature of pedestal (kev)
 * JUSTIFICATION: Initial value - then over written by ieped=1 scaling 
 
@@ -453,11 +457,11 @@ temp_plasma_separatrix_electron_kev = 0.1
 
 
 
-p_plant_electric_net_required_mw = 350.0
+p_plant_electric_net_required_mw = 100.0
 * DESCRIPTION:   Required net electric power (MW) (icc=16)
 * JUSTIFICATION: Used with icc=16 to set the enforced net electric power 
 
-t_burn_min = 5e3
+t_burn_min = 3.5e3
 * DESCRIPTION:   Minimum burn time (s) (icc=13)
 * JUSTIFICATION: Used with icc=13 to set the enforced minimum burn time
 
@@ -767,7 +771,7 @@ radius_plasma_core_norm = 0.75
 * DESCRIPTION:   Normalised Radius Defining the 'Core' Region
 * JUSTIFICATION: Based on ASTRA/TGLF simulations for DEMO
 
-f_p_plasma_core_rad_reduction = 0.6
+f_p_plasma_core_rad_reduction = 1.0
 * DESCRIPTION:   Fraction of Radiation from Core Region Lost
 * JUSTIFICATION: Based on ASTRA/TGLF simulations for DEMO
 
@@ -975,4 +979,3 @@ qnuc = 1.292E4
 v_tf_coil_dump_quench_max_kv    = 10.00 
 * DESCRIPTION:   Max voltage across tf coil during quench (kv)
 * JUSTIFICATION: 
-
