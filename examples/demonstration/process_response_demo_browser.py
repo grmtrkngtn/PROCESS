@@ -398,6 +398,12 @@ You now have two control levers: **heating** and **fuelling**.
 
 Change them and watch how the resulting PROCESS solution moves through the plasma operating space.
 
+/// admonition
+
+<b>Aim:</b> understand the link between the <b>controls you choose</b> and the <b>plasma state that results</b>, and how performance and constraint margin change as that solution moves.
+
+///
+
 
 /// details | 🗺️ How to Read the Plasma Solution Space
 
@@ -474,11 +480,7 @@ A solution can therefore satisfy both governing equations while still violating 
 
 ///
 
-/// admonition
 
-<b>Aim:</b> understand the link between the <b>controls you choose</b> and the <b>plasma state that results</b>, and how performance and constraint margin change as that solution moves.
-
-///
 
 """)
 
@@ -937,8 +939,7 @@ $$
 }
 $$
 
-**We decide what matters, and encode those engineering priorities in the optimisation problem, and use the solver to find the optimimum solution**
-
+**We define the design variables, governing equations, feasibility constraints and optimisation objective, then use a numerical solver to identify the design that best satisfies our engineering requirements.**
 """)
 
 
