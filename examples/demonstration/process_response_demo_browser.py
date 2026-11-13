@@ -44,7 +44,7 @@ def _(mo):
 # Exploring Fusion Power Plant Design with PROCESS
 **PROCESS** is a fusion power plant **systems code** developed at UKAEA by the Power Plant Modelling and Integration (PPMI) group.
 
-It models an entire tokamak power plant using reduced-order (0D–1D) models, covering everything from plasma physics and magnets to the divertor, engineering systems, buildings and costs.
+It models entire fusion power plants using reduced-order (0D–1D) models, covering everything from plasma physics and magnets to the divertor, engineering systems, buildings and costs.
 
 The strength of PROCESS lies in its **breadth rather than depth**: modelling individual systems at relatively low fidelity allows us to study the power plant as a single, integrated system.
 
