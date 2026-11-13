@@ -33,50 +33,60 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # PROCESS: From Integrated Reactor Design to Plasma Equilibrium Exploration
+# Exploring Fusion Power Plant Design with PROCESS
 
-    **PROCESS** is a systems code for the conceptual design and optimisation of fusion power plants.
+### What is PROCESS?
 
-    It couples reduced-order plasma-physics and engineering models so that a reactor can be assessed as a
-    **single self-consistent system**, rather than as a collection of independent subsystems.
+**PROCESS** is a fusion power plant **systems code** developed at UKAEA by the Power Plant Modelling and Integration (PPMI) group.
 
-    PROCESS is developed by the Power Plant Modelling and Integration (PPMI) group within Fusion Technology at UKAEA.
+It models an entire tokamak power plant using reduced-order (0D–1D) models, covering everything from plasma physics and magnets to the divertor, engineering systems, buildings and costs.
 
-    ---
+The strength of PROCESS lies in its **breadth rather than depth**: modelling individual systems at relatively low fidelity allows us to study the power plant as a single, integrated system.
 
-    /// details | 🌍 Role in fusion design studies
+### Why is that useful?
 
-    - Explore broad reactor design spaces quickly.
-    - Test whether proposed designs satisfy coupled physics and engineering requirements.
-    - Identify trade-offs between plasma performance, magnets, geometry, power balance and plant performance.
-    - Provide an integrated starting point for more detailed design studies.
+Fusion power plant design is fundamentally about **trade-offs**. Improving one aspect of a design can make another more difficult.
 
-    ///
+For example, increasing fusion power places greater demands on plasma-facing components and heat exhaust systems.
 
-    ---
+PROCESS allows us to explore these competing requirements and understand how decisions about one part of the reactor affect the others.
 
-    /// details | 🔧 Modelling approach
+### What is this notebook about?
 
-    - **Reduced-order models** — mainly 0D–1D descriptions of the plasma and plant systems.
-    - **Coupled calculation** — changing one part of the reactor can alter many others.
-    - **Fast evaluation** — suitable for parameter scans, optimisation and uncertainty studies.
+This notebook introduces how PROCESS works and the kinds of problems it can solve, giving you a taste of **what it's like to be a fusion power plant designer**.
 
-    ///
+Through two interactive exercises, you'll explore how a self-consistent plasma solution is defined and how changing design and control parameters affects its performance and feasibility.
 
-    ---
+---
 
-    /// details | 🧭 Learning goals
+/// details | 🔧 Modelling approach
 
-    By the end of the notebook you should understand:
+- **Reduced-order models** — mainly 0D–1D descriptions of the plasma and plant systems.
 
-    1. How to represent a fusion power plant as a coupled system of models;
-    2. How a self-consistent fusion power plant plasma state is defined;
+- **Coupled calculation** — changing one part of the reactor can alter many others.
 
-    3. How changing design choices moves the solution through design space;
-    4. **How PROCESS helps us make answer the above points and make design decisions** by exposing the trade-offs between performance, feasibility and operating margin.
+- **Fast evaluation** — suitable for parameter scans, optimisation and uncertainty studies.
 
-    ///
-    """)
+///
+
+---
+
+/// details | 🧭 Learning goals
+
+By the end of the notebook you should understand:
+
+1. PROCESS is a systems code that represents a fusion power plant as a coupled system of models;
+
+2. How a self-consistent fusion power plant plasma solution is defined;
+
+3. How the plasma solution responds to changes in design and control parameters;
+
+4. How PROCESS supports reactor design decisions by revealing trade-offs between performance, feasibility and operating margin.
+
+///
+""")
+
+
 
 
 @app.cell(hide_code=True)
