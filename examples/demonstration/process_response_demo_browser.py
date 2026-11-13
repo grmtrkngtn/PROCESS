@@ -64,14 +64,13 @@ PROCESS allows us to explore these competing requirements and understand how dec
 
 /// details | 🎯 Learning goals
 
-This notebook introduces how PROCESS works and the kinds of problems it can solve, giving you a taste of **what it's like to be a fusion power plant designer**.
+This notebook introduces how PROCESS works and the problems it can solve, giving you a taste of what it's like to be a fusion power plant designer through two interactive exercises.
 
-Through two interactive exercises, you'll explore how a self-consistent plasma solution is defined and how changing design and control parameters affects its performance and feasibility.
+By the end, you will understand: 
 
-1. How PROCESS represents a fusion power plant as a coupled system of models.
-2. How a self-consistent plasma solution is defined.
-3. How the plasma solution responds to changes in design and control parameters.
-4. How PROCESS supports design decisions by revealing trade-offs between performance, feasibility and operating margin.
+1. How PROCESS defines a self-consistent plasma solution.
+2. How the plasma solution responds to changes in design and control parameters.
+3. How PROCESS supports design decisions by revealing trade-offs between performance, feasibility and operating margin.
 
 ///
 
@@ -191,6 +190,16 @@ def _(mo):
 
 ## 🧩 PROCESS: Problem Formulation
 
+$$
+\boxed{
+\text{Inputs}
+\;\longrightarrow\;
+\text{PROCESS}
+\;\longrightarrow\;
+\text{Outputs}
+}
+$$
+
 PROCESS can be thought of as a **complex function which maps inputs to outputs** describing a steady-state fusion power plant.
 
 $$
@@ -199,7 +208,7 @@ $$
 
 /// admonition
 
-<b>In simple terms:</b> we specify what we know or choose, PROCESS solves the coupled physics and engineering problem, and returns the resulting reactor state.
+<b>In simple terms:</b> we specify what we know and want, PROCESS solves the coupled physics and engineering problem, and returns the resulting power plant design.
 
 ///
 
@@ -226,16 +235,6 @@ $$
 ---
 
 This distinction is useful because different analyses choose different quantities to **prescribe, vary, solve for, or treat as uncertain**.
-
-$$
-\boxed{
-\text{Inputs}
-\;\longrightarrow\;
-\text{PROCESS}
-\;\longrightarrow\;
-\text{Outputs}
-}
-$$
 
 """)
 
