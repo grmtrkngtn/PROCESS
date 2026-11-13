@@ -37,34 +37,33 @@ def _():
     return mo, Path, load_manifest, show_asset
 
 
+
 @app.cell(hide_code=True)
 def _(mo):
-
     mo.md(r"""
+# Exploring Fusion Power Plant Design with PROCESS
 
-# PROCESS: From Integrated Reactor Design to Plasma Equilibrium Exploration
+### What is PROCESS?
 
-**PROCESS** is a systems code for the conceptual design and optimisation of fusion power plants.
+**PROCESS** is a fusion power plant **systems code** developed at UKAEA by the Power Plant Modelling and Integration (PPMI) group.
 
-It couples reduced-order plasma-physics and engineering models so that a reactor can be assessed as a
+It models an entire tokamak power plant using reduced-order (0D–1D) models, covering everything from plasma physics and magnets to the divertor, engineering systems, buildings and costs.
 
-**single self-consistent system**, rather than as a collection of independent subsystems.
+The strength of PROCESS lies in its **breadth rather than depth**: modelling individual systems at relatively low fidelity allows us to study the power plant as a single, integrated system.
 
-PROCESS is developed by the Power Plant Modelling and Integration (PPMI) group within Fusion Technology at UKAEA.
+### Why is that useful?
 
----
+Fusion power plant design is fundamentally about **trade-offs**. Improving one aspect of a design can make another more difficult.
 
-/// details | 🌍 Role in fusion design studies
+For example, increasing fusion power places greater demands on plasma-facing components and heat exhaust systems.
 
-- Explore broad reactor design spaces quickly.
+PROCESS allows us to explore these competing requirements and understand how decisions about one part of the reactor affect the others.
 
-- Test whether proposed designs satisfy coupled physics and engineering requirements.
+### What is this notebook about?
 
-- Identify trade-offs between plasma performance, magnets, geometry, power balance and plant performance.
+This notebook introduces how PROCESS works and the kinds of problems it can solve, giving you a taste of **what it's like to be a fusion power plant designer**.
 
-- Provide an integrated starting point for more detailed design studies.
-
-///
+Through two interactive exercises, you'll explore how a self-consistent plasma solution is defined and how changing design and control parameters affects its performance and feasibility.
 
 ---
 
@@ -84,16 +83,15 @@ PROCESS is developed by the Power Plant Modelling and Integration (PPMI) group w
 
 By the end of the notebook you should understand:
 
-1. How to represent a fusion power plant as a coupled system of models;
+1. PROCESS is a systems code that represents a fusion power plant as a coupled system of models;
 
-2. How a self-consistent fusion power plant plasma state is defined;
+2. How a self-consistent fusion power plant plasma solution is defined;
 
-3. How changing design choices moves the solution through design space;
+3. How the plasma solution responds to changes in design and control parameters;
 
-4. **How PROCESS helps us make answer the above points and make design decisions** by exposing the trade-offs between performance, feasibility and operating margin.
+4. How PROCESS supports reactor design decisions by revealing trade-offs between performance, feasibility and operating margin.
 
 ///
-
 """)
 
 
