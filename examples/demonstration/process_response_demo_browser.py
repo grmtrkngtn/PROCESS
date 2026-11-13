@@ -62,29 +62,11 @@ PROCESS allows us to explore these competing requirements and understand how dec
 
 ---
 
-/// details | 🧭 What will we explore?
+/// details | 🎯 Learning goals
 
 This notebook introduces how PROCESS works and the kinds of problems it can solve, giving you a taste of **what it's like to be a fusion power plant designer**.
 
 Through two interactive exercises, you'll explore how a self-consistent plasma solution is defined and how changing design and control parameters affects its performance and feasibility.
-
-///
-
----
-
-/// details | 🔧 Modelling approach
-
-- **Reduced-order models** — mainly 0D–1D descriptions of the plasma and plant systems.
-- **Coupled calculation** — changing one part of the reactor can alter many others.
-- **Fast evaluation** — suitable for parameter scans, optimisation and uncertainty studies.
-
-///
-
----
-
-/// details | 🎯 Learning goals
-
-By the end of the notebook you should understand:
 
 1. How PROCESS represents a fusion power plant as a coupled system of models.
 2. How a self-consistent plasma solution is defined.
@@ -92,6 +74,19 @@ By the end of the notebook you should understand:
 4. How PROCESS supports design decisions by revealing trade-offs between performance, feasibility and operating margin.
 
 ///
+
+---
+
+/// details | 🔧 Technical details
+
+- **Open source** — developed at UKAEA and available on [GitHub](https://github.com/ukaea/PROCESS).
+- **Python-based** — with compiled numerical components for computational performance.
+- **Reduced-order modelling** — primarily 0D–1D plasma physics and engineering models.
+- **Integrated calculations** — couples plasma, magnets, power systems, geometry and costs.
+- **Design exploration** — supports optimisation, parameter scans and uncertainty quantification.
+
+///
+
 """)
 
 
