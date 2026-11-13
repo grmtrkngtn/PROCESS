@@ -78,11 +78,12 @@ By the end, you will understand:
 
 /// details | 🔧 Technical details
 
-- **Open source** — developed at UKAEA and available on [GitHub](https://github.com/ukaea/PROCESS).
-- **Python-based** — with compiled numerical components for computational performance.
 - **Reduced-order modelling** — primarily 0D–1D plasma physics and engineering models.
 - **Integrated calculations** — couples plasma, magnets, power systems, geometry and costs.
 - **Design exploration** — supports optimisation, parameter scans and uncertainty quantification.
+- **Open source** — developed in Python at UKAEA and available on [GitHub](https://github.com/ukaea/PROCESS).
+
+
 
 ///
 
@@ -460,6 +461,8 @@ The dashed curves show where selected physics limits become active, including:
 These limits do not define the PROCESS solution — they determine whether that solution is **feasible**.
 
 A solution can therefore satisfy both governing equations while still violating one or more operating limits.
+
+The _hatched_ region shows where a given constraint is violated, while the _unhatched_ region shows where it is satisfied.
 
 ///
 
