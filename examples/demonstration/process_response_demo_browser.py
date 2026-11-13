@@ -236,6 +236,8 @@ $$
 
 This distinction is useful because different analyses choose different quantities to **prescribe, vary, solve for, or treat as uncertain**.
 
+---
+
 """)
 
 
@@ -350,9 +352,7 @@ This gives a closed two-equation nonlinear problem for the two plasma-state vari
 
 Once this state has been found, PROCESS evaluates the coupled physics and engineering models to determine the remaining outputs,
 
-$$
-\mathbf y = F(\mathbf x,\mathbf d,\mathbf u,\boldsymbol{\theta}).
-$$
+---
 
 """)
 
@@ -369,7 +369,7 @@ Now that we have defined the PROCESS problem, we can use it to ask a simple but 
 
 /// admonition
 
-**If we change the controls, how does the steady-state plasma operating point respond?**
+**If we change the controls, how does the steady-state plasma solution respond?**
 
 ///
 
@@ -390,6 +390,14 @@ $$
 In this way, PROCESS can be used to **simulate the steady-state plasma response to changes in the control inputs**.
 
 ---
+
+
+## 🎛️ Exercise 1: Explore the Plasma Response
+
+You now have two control levers: **heating** and **fuelling**.
+
+Change them and watch how the resulting PROCESS solution moves through the plasma operating space.
+
 
 /// details | 🗺️ How to Read the Plasma Solution Space
 
@@ -449,13 +457,6 @@ A solution can therefore satisfy both governing equations while still violating 
 
 ///
 
----
-
-## 🎛️ Exercise 1: Explore the Plasma Response
-
-You now have two control levers: **heating** and **fuelling**.
-
-Change them and watch how the resulting PROCESS solution moves through the plasma operating space.
 
 /// details | 🔎 Questions to explore
 
