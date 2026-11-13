@@ -42,16 +42,15 @@ def _():
 def _(mo):
     mo.md(r"""
 # Exploring Fusion Power Plant Design with PROCESS
-
-### What is PROCESS?
-
 **PROCESS** is a fusion power plant **systems code** developed at UKAEA by the Power Plant Modelling and Integration (PPMI) group.
 
 It models an entire tokamak power plant using reduced-order (0D–1D) models, covering everything from plasma physics and magnets to the divertor, engineering systems, buildings and costs.
 
 The strength of PROCESS lies in its **breadth rather than depth**: modelling individual systems at relatively low fidelity allows us to study the power plant as a single, integrated system.
 
-### Why is that useful?
+---
+
+/// details | ⚖️ Why is PROCESS useful?
 
 Fusion power plant design is fundamentally about **trade-offs**. Improving one aspect of a design can make another more difficult.
 
@@ -59,41 +58,41 @@ For example, increasing fusion power places greater demands on plasma-facing com
 
 PROCESS allows us to explore these competing requirements and understand how decisions about one part of the reactor affect the others.
 
-### What is this notebook about?
+///
+
+---
+
+/// details | 🧭 What will we explore?
 
 This notebook introduces how PROCESS works and the kinds of problems it can solve, giving you a taste of **what it's like to be a fusion power plant designer**.
 
 Through two interactive exercises, you'll explore how a self-consistent plasma solution is defined and how changing design and control parameters affects its performance and feasibility.
+
+///
 
 ---
 
 /// details | 🔧 Modelling approach
 
 - **Reduced-order models** — mainly 0D–1D descriptions of the plasma and plant systems.
-
 - **Coupled calculation** — changing one part of the reactor can alter many others.
-
 - **Fast evaluation** — suitable for parameter scans, optimisation and uncertainty studies.
 
 ///
 
 ---
 
-/// details | 🧭 Learning goals
+/// details | 🎯 Learning goals
 
 By the end of the notebook you should understand:
 
-1. PROCESS is a systems code that represents a fusion power plant as a coupled system of models;
-
-2. How a self-consistent fusion power plant plasma solution is defined;
-
-3. How the plasma solution responds to changes in design and control parameters;
-
-4. How PROCESS supports reactor design decisions by revealing trade-offs between performance, feasibility and operating margin.
+1. How PROCESS represents a fusion power plant as a coupled system of models.
+2. How a self-consistent plasma solution is defined.
+3. How the plasma solution responds to changes in design and control parameters.
+4. How PROCESS supports design decisions by revealing trade-offs between performance, feasibility and operating margin.
 
 ///
 """)
-
 
 
 @app.cell(hide_code=True)
