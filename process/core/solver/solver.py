@@ -425,8 +425,10 @@ class ScipySLSQP(_Solver):
     Stage 1 makes up to three attempts: the original start and two small,
     reproducible, bound-respecting perturbations (5% of each variable range).
     All attempts use the same ``epsfcn`` finite-difference step.
-    The best verified Stage-1 candidate warm-starts a single Stage-2 attempt;
-    a single Stage-3 attempt follows only if equilibrium was not recovered.
+    The best verified Stage-1 candidate seeds up to three Stage-2 attempts:
+    the original start and two bounded 5%-range perturbations. Stage 2 stops
+    at the first verified equilibrium. A single Stage-3 attempt follows only
+    if equilibrium was not recovered.
     There is no finite-difference sweep or adaptive rescue chain.
 
     Compared with Jon's historical implementation, Stage 2 uses the current
@@ -873,7 +875,7 @@ class ScipySLSQP(_Solver):
             f"{self.m - self.meq} inequalities; "
             f"Stage-1 starts={len(starts)} (original + 2 bounded 5% wiggles); "
             f"finite_diff_rel_step={epsfcn:.3e} (fixed); "
-            "Stage 2=FOM 20 / equalities only (1 attempt); "
+            "Stage 2=FOM 20 / equalities only (up to 3 attempts); "
             "Stage 3=governing residual (1 attempt); "
             f"Stage-3 C30 guard={'active' if guard is not None else 'inactive'}; "
             f"raw Psep >= {self.PSEP_MIN_MW:g} MW in all stages"
@@ -948,29 +950,65 @@ class ScipySLSQP(_Solver):
         # so the stored objective and downstream PROCESS output are consistent.
         self._set_problem_type(1)
         original_fom = self.data.numerics.i_figure_merit
-        self.data.numerics.i_figure_merit = 20  # MIN_INEQ_CONSTRAINT_VIOLATION
         print(
             "\nStage 2: minimise inequality violations (FOM 20, L8); "
             "hard constraints = governing equalities and variable bounds"
         )
-        try:
-            result2 = self._run_stage(
-                "equality-only",
-                self._objective,
-                equality_constraints,
-                epsfcn,
-                self.EQ_MAXITER,
-                stage2_start,
-            )
-            if result2 is not None and np.isfinite(result2.fun):
-                print(f"  Stage 2 final FOM 20: {float(result2.fun):.6e}")
-        finally:
-            self.data.numerics.i_figure_merit = original_fom
 
-        # Both the original objective and constraint values are now evaluated
-        # with the original FOM restored. No engineering requirement is used as
-        # a Stage-2 acceptance condition; only governing equalities are checked.
-        candidate2 = self._full_result(result2)
+        # Three *different* starts: best Stage-1 endpoint, followed by two
+        # reproducible, bound-respecting 5%-range perturbations of that point.
+        # Stop as soon as governing equilibrium is independently verified.
+        # If none recover, retain the best unsuccessful candidate for Stage 3.
+        stage2_starts = self._stage1_starts(stage2_start, self.bounds)
+        result2 = None
+        candidate2 = None
+        best_failed_score = None
+        for attempt, start in enumerate(stage2_starts, start=1):
+            print(f"\n--- Stage 2 attempt {attempt}/{len(stage2_starts)} ---")
+            self.data.numerics.i_figure_merit = 20
+            try:
+                current_result = self._run_stage(
+                    "equality-only",
+                    self._objective,
+                    equality_constraints,
+                    epsfcn,
+                    self.EQ_MAXITER,
+                    start,
+                )
+                if current_result is not None and np.isfinite(current_result.fun):
+                    print(f"  Stage 2 final FOM 20: {float(current_result.fun):.6e}")
+            finally:
+                # Restore before verifying output under the original objective.
+                self.data.numerics.i_figure_merit = original_fom
+
+            current_candidate = self._full_result(current_result)
+            if current_candidate is None:
+                continue
+
+            eq_rmse, eq_max, _, _ = current_candidate[3]
+            domain_ok = current_candidate[4] >= self.PSEP_MIN_MW
+            print(
+                f"  Stage 2 candidate: eq_max={eq_max:.3e}, "
+                f"Psep-domain={'OK' if domain_ok else 'FAILED'}"
+            )
+
+            if eq_max <= self.ACCEPT_EQ_TOL and domain_ok:
+                candidate2 = current_candidate
+                result2 = current_result
+                print(f"  Governing equilibrium recovered on Stage 2 attempt {attempt}")
+                break
+
+            # Prioritise admissible physical-domain points and small equality
+            # residuals when choosing a starting state for Stage 3.
+            failed_score = (not domain_ok, eq_max, eq_rmse)
+            if best_failed_score is None or failed_score < best_failed_score:
+                best_failed_score = failed_score
+                candidate2 = current_candidate
+                result2 = current_result
+
+        # Each Stage-2 candidate was re-evaluated with original FOM restored.
+        # Stage-2 success depends on governing equations and the Psep domain,
+        # not on engineering-inequality feasibility.
 
         # Keep any equilibrium found during Stage 1 even if Stage 2 fails.
         equilibrium_candidates = []
