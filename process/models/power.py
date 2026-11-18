@@ -1681,6 +1681,7 @@ class Power(Model):
         # by the cooling system (MW)
         self.data.heat_transport.p_plant_secondary_heat_mw = (
             self.data.power.p_plant_core_systems_elec_mw
+            - self.data.physics.p_plasma_ohmic_mw
             + self.data.heat_transport.p_hcd_electric_loss_mw
             + self.data.heat_transport.p_coolant_pump_loss_total_mw
             + self.data.heat_transport.p_div_secondary_heat_mw
