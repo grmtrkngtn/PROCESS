@@ -214,7 +214,8 @@ def _apply_scale(func):
 def leq(value: float, bound: float, registration: ConstraintRegistration):
     """The equation `value <= bound`."""
     residual = value - bound
-    normalised_residual = (value / bound) - 1.0
+    normalised_residual = (value - bound) / max(abs(bound), 1.0e-12)
+
     return ConstraintResult(
         **asdict(registration),
         constraint_value=value,
@@ -228,7 +229,8 @@ def leq(value: float, bound: float, registration: ConstraintRegistration):
 def geq(value: float, bound: float, registration: ConstraintRegistration):
     """The equation `value >= bound`."""
     residual = bound - value
-    normalised_residual = 1.0 - (value / bound)
+    normalised_residual = residual / max(abs(bound), 1.0e-12)
+
     return ConstraintResult(
         **asdict(registration),
         constraint_value=value,
