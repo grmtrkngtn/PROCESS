@@ -599,9 +599,12 @@ class Power(Model):
         #  This is additional to that required for moving stored energy around
         # p_pf_electric_supplies_mw = self.data.physics.p_plasma_ohmic_mw
         # / self.data.pf_coil.etapsu
-        wall_plug_ohmicmw = self.data.physics.p_plasma_ohmic_mw * (
-            1.0e0 / self.data.pf_coil.etapsu - 1.0e0
+        # Account for the full electrical power required to supply inductive
+        # ohmic heating to the plasma, including power-supply losses.
+        wall_plug_ohmicmw = (
+            self.data.physics.p_plasma_ohmic_mw / self.data.pf_coil.etapsu
         )
+
         # Total mean wall plug power dissipated in PFC and CS power supplies. Issue #713
         self.data.pf_coil.p_pf_electric_supplies_mw = wall_plug_ohmicmw + pfpowermw
 
